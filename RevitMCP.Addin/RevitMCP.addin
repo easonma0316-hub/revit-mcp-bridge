@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RevitAddIns>
+  <AddIn Type="Application">
+    <Name>RevitMCP</Name>
+    <!-- If the DLL is NOT next to this .addin file, use a full path here. -->
+    <Assembly>RevitMCP.Addin.dll</Assembly>
+    <FullClassName>RevitMCP.Addin.RevitMcpApp</FullClassName>
+    <AddInId>4b6f3c2a-9d1e-4a77-bf2c-7e2d9a1c4f10</AddInId>
+    <VendorId>EASON</VendorId>
+    <VendorDescription>RevitMCP - Model Context Protocol bridge for Revit 2024</VendorDescription>
+  </AddIn>
+</RevitAddIns>
