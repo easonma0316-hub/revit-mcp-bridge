@@ -1,0 +1,47 @@
+# Compile-only CI: proves the add-in and the Python server build, without needing
+# a Revit install (the Revit API comes from NuGet). This is a compile gate, not a
+# functional test - it cannot run tools inside Revit.
+#
+# net48 is Windows-only, so the C# job must run on windows-latest. On a PRIVATE
+# repo, Windows minutes count 2x against the Actions quota, so this only runs on
+# pull requests and pushes to main (not on every WIP push). Broaden `on:` if you
+# want per-push checks on feature branches.
+name: build
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-addin:
+    name: Build Revit add-in (net48)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Build add-in (Release)
+        run: dotnet build RevitMCP.Addin/RevitMCP.Addin.csproj -c Release
+
+  check-python:
+    name: Check Python MCP server
+    runs-on: ubuntu-latest # 1x quota; the Python check needs no Windows
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r mcp_server/requirements.txt
+
+      - name: Byte-compile the server
+        run: python -m py_compile mcp_server/server.py
