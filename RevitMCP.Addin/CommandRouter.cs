@@ -398,7 +398,7 @@ namespace RevitMCP.Addin
                 .ToList();
 
             // Temporary isolate is a view state, not a document change — no transaction.
-            view.IsolateElementsTemporarily(ids);
+            view.IsolateElementsTemporary(ids);
             return new Dictionary<string, object>
             {
                 ["view"] = view.Name,
