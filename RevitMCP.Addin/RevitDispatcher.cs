@@ -5,16 +5,14 @@ using Autodesk.Revit.UI;
 namespace RevitMCP.Addin
 {
     /// <summary>
-    /// Marshals command execution from the background HTTP thread onto Revit's UI
-    /// thread via an ExternalEvent, then blocks until the result is ready.
+    /// Marshals command execution from a background HTTP thread onto Revit's UI
+    /// thread. Each call gets its own <see cref="PendingRequest"/>, so requests can
+    /// be queued concurrently and a timed-out request can't corrupt a later one.
     /// </summary>
     public class RevitDispatcher
     {
         private readonly ExternalEvent _externalEvent;
         private readonly RequestHandler _handler;
-
-        // Revit allows only one ExternalEvent round-trip at a time, so serialize requests.
-        private readonly object _gate = new object();
 
         public RevitDispatcher()
         {
@@ -22,23 +20,32 @@ namespace RevitMCP.Addin
             _externalEvent = ExternalEvent.Create(_handler);
         }
 
-        public Dictionary<string, object> Execute(string command, Dictionary<string, object> parameters, int timeoutMs = 30000)
+        public Dictionary<string, object> Execute(string command, Dictionary<string, object> parameters, int timeoutMs)
         {
-            lock (_gate)
+            var request = new PendingRequest
             {
-                _handler.Prepare(command, parameters);
-                _externalEvent.Raise();
+                Command = command,
+                Params = parameters ?? new Dictionary<string, object>()
+            };
 
-                if (!_handler.Done.Wait(timeoutMs))
-                    throw new TimeoutException(
-                        $"Revit did not process '{command}' within {timeoutMs} ms " +
-                        "(is a modal dialog open, or is Revit busy?).");
+            _handler.Enqueue(request);
+            _externalEvent.Raise();
 
-                if (_handler.Error != null)
-                    throw new Exception(_handler.Error.Message, _handler.Error);
-
-                return _handler.Result;
+            if (!request.Done.Wait(timeoutMs))
+            {
+                request.Abandoned = true;
+                throw new McpException(McpException.Internal,
+                    $"Revit did not process '{command}' within {timeoutMs} ms. " +
+                    "A modal dialog may be open, or Revit may be busy with a long operation.");
             }
+
+            if (request.Error != null)
+            {
+                if (request.Error is McpException) throw request.Error;
+                throw new McpException(McpException.Internal, request.Error.Message, request.Error);
+            }
+
+            return request.Result;
         }
     }
 }
