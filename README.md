@@ -92,7 +92,41 @@ has a matching variable on the Python side.
 | `REVIT_MCP_URL` | `http://127.0.0.1:8765/` | *(Python side)* add-in URL; set this if Revit bound a fallback port. |
 | `REVIT_MCP_TIMEOUT` | `65` | *(Python side)* HTTP timeout in seconds. |
 
-## Build the add-in
+## Install (for users)
+
+If you just want to *use* RevitMCP (not develop it), you don't need the .NET SDK
+or to build anything.
+
+**1. Install the Revit add-in** — download `RevitMCP-addin.zip` from the
+[latest release](https://github.com/easonma0316-hub/revit-mcp-bridge/releases/latest),
+unzip it, and run the bundled installer from that folder:
+
+```powershell
+.\install.ps1          # auto-detects your installed Revit year(s) and copies the add-in
+```
+
+Then start Revit, open a model, and choose **Always Load** at the security prompt.
+
+**2. Connect the MCP server** — no clone or virtualenv needed if you have
+[pipx](https://pipx.pypa.io) or [uv](https://docs.astral.sh/uv/):
+
+```powershell
+# via uv (recommended)
+claude mcp add revit -- uvx --from git+https://github.com/easonma0316-hub/revit-mcp-bridge revit-mcp-bridge
+
+# or via pipx
+pipx install git+https://github.com/easonma0316-hub/revit-mcp-bridge
+claude mcp add revit -- revit-mcp-bridge
+```
+
+Restart your MCP client and run `/mcp` — you should see `revit` with its tools.
+(Once the package is published to PyPI, the `git+` URL becomes just
+`revit-mcp-bridge`.)
+
+Developers building from source should follow the sections below (or `SETUP.md`
+for a full guided walkthrough).
+
+## Build the add-in (from source)
 
 Requires the .NET Framework 4.8 targeting pack (ships with Visual Studio 2022, or
 install "MSBuild Tools" + the 4.8 targeting pack). The Revit 2024 API comes from

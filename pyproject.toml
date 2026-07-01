@@ -1,0 +1,29 @@
+[project]
+name = "revit-mcp-bridge"
+version = "0.1.0"
+description = "MCP server bridging AI clients (Claude, Cursor, ...) to Autodesk Revit over HTTP."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Eason Ma" }]
+keywords = ["revit", "mcp", "model-context-protocol", "bim", "autodesk", "ai"]
+dependencies = [
+    "mcp>=1.2.0",
+    "httpx>=0.27",
+]
+
+[project.urls]
+Homepage = "https://github.com/easonma0316-hub/revit-mcp-bridge"
+Repository = "https://github.com/easonma0316-hub/revit-mcp-bridge"
+
+# Exposes the `revit-mcp-bridge` command, so `pipx install .` / `uvx revit-mcp-bridge`
+# launch the server without a manual venv. Keeps `python mcp_server/server.py` working too.
+[project.scripts]
+revit-mcp-bridge = "mcp_server.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["mcp_server"]
