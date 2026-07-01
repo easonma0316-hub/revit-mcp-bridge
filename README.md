@@ -1,5 +1,11 @@
 # RevitMCP
 
+[![build](https://github.com/easonma0316-hub/revit-mcp-bridge/actions/workflows/build.yml/badge.svg)](https://github.com/easonma0316-hub/revit-mcp-bridge/actions/workflows/build.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+![Revit 2024](https://img.shields.io/badge/Revit-2024-0696D7?logo=autodesk&logoColor=white)
+![.NET Framework 4.8](https://img.shields.io/badge/.NET%20Framework-4.8-512BD4)
+![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
+
 A Model Context Protocol (MCP) bridge for **Autodesk Revit**, so an MCP client
 (Claude Code, Claude Desktop, Cursor, …) can read from and act on the open Revit
 model — think of it as the Revit equivalent of an AI copilot wired straight into
