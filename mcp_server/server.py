@@ -220,5 +220,10 @@ def delete_elements(element_ids: list[int]) -> dict:
     return _call("delete_elements", {"ids": element_ids})
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """Console-script entry point (see pyproject.toml). Runs the stdio server."""
     mcp.run()  # stdio transport; the MCP client launches this process
+
+
+if __name__ == "__main__":
+    main()
