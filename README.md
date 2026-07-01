@@ -89,15 +89,26 @@ has a matching variable on the Python side.
 ## Build the add-in
 
 Requires the .NET Framework 4.8 targeting pack (ships with Visual Studio 2022, or
-install "MSBuild Tools" + the 4.8 targeting pack). The `.csproj` points at the
-Revit 2024 API DLLs under `C:\Program Files\Autodesk\Revit 2024\`; edit the
-`HintPath`s if your Revit lives elsewhere or you target a different year.
+install "MSBuild Tools" + the 4.8 targeting pack). The Revit 2024 API comes from
+NuGet (`Nice3point.Revit.Api.*`, which repackages the real Revit assemblies), so
+the project builds even on a machine without Revit installed — no `HintPath`
+editing needed. To target another Revit year, bump both package versions in the
+`.csproj` (e.g. `2025.*`); to use a local Revit install instead, see the comment
+in the `.csproj`.
 
 ```powershell
 dotnet build .\RevitMCP.Addin\RevitMCP.Addin.csproj -c Release
 ```
 
-Output: `RevitMCP.Addin\bin\Release\RevitMCP.Addin.dll`.
+Output: `RevitMCP.Addin\bin\Release\RevitMCP.Addin.dll`. The Revit API DLLs are
+compile-only and are **not** copied to `bin` — Revit loads its own at runtime.
+
+### Continuous integration
+
+`.github/workflows/build.yml` compiles the add-in (on Windows, since net48 is
+Windows-only) and byte-compiles the Python server on every pull request and push
+to `main`. It's a **compile gate**, not a functional test — it can't run tools
+inside Revit.
 
 ## Install the add-in into Revit
 
