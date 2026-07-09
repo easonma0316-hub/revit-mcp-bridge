@@ -1,3 +1,4 @@
+using System;
 using Autodesk.Revit.UI;
 
 namespace RevitMCP.Addin
@@ -19,7 +20,34 @@ namespace RevitMCP.Addin
             // ExternalEvent.Create must run on the Revit UI thread — OnStartup is a valid context.
             _dispatcher = new RevitDispatcher();
             _server = new HttpServer(Prefix, _dispatcher);
-            _server.Start();
+
+            try
+            {
+                _server.Start();
+            }
+            catch (System.Net.HttpListenerException ex)
+            {
+                // Most common cause on Windows: no URL ACL reservation and Revit isn't
+                // elevated, so HttpListener.Start() fails with "Access is denied" (5).
+                // Surface it instead of failing silently — the add-in would otherwise
+                // report success while the MCP bridge never listens.
+                TaskDialog.Show(
+                    "RevitMCP",
+                    "The MCP HTTP listener could not start on\n" +
+                    Prefix + "\n\n" +
+                    "Reason: " + ex.Message + " (code " + ex.ErrorCode + ")\n\n" +
+                    "If this is an 'Access is denied' error, reserve the URL once from an\n" +
+                    "elevated PowerShell:\n\n" +
+                    "    netsh http add urlacl url=" + Prefix + " user=Everyone\n\n" +
+                    "then restart Revit.");
+                return Result.Failed;
+            }
+            catch (Exception ex)
+            {
+                TaskDialog.Show("RevitMCP", "The MCP HTTP listener failed to start:\n\n" + ex);
+                return Result.Failed;
+            }
+
             return Result.Succeeded;
         }
 

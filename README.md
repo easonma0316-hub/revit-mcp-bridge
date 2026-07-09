@@ -79,8 +79,41 @@ claude mcp add revit -- D:\GitHub\RevitMCP\.venv\Scripts\python.exe D:\GitHub\Re
 claude mcp list
 ```
 
-Restart Claude Code, then `/mcp` should list `revit` with the tools `ping`,
-`get_selection`, `get_element_info`, `set_parameter`.
+Restart Claude Code, then `/mcp` should list `revit` with 26 tools:
+
+| Group | Tools |
+|---|---|
+| Connection | `ping` |
+| Project & model queries | `get_project_info`, `list_levels`, `list_views`, `list_categories`, `list_family_types` |
+| Element queries | `get_elements`, `filter_elements`, `get_view_elements`, `get_selection`, `get_element_info`, `get_location` |
+| Element edits | `set_parameter`, `move_elements`, `copy_elements`, `delete_elements` |
+| Creation | `create_wall`, `create_floor`, `create_level`, `create_grid`, `create_room`, `place_family_instance` |
+| UI & views | `select_elements`, `set_active_view`, `color_elements`, `export_view_image` |
+
+## ⚠️ Optional power tool: `execute_code` (disabled by default)
+
+There is a 27th tool, **`execute_code`**, that lets the AI compile and run
+**arbitrary C# inside the Revit process** — full Revit API access for anything
+the curated tools can't do. It is **not registered unless you opt in**, because
+arbitrary code can do far more damage than any single-purpose tool (and is not
+limited to the Revit API).
+
+**Enable it** by setting `REVIT_MCP_ENABLE_CODE=1` in the MCP server's
+environment when registering it:
+
+```powershell
+claude mcp add revit --env REVIT_MCP_ENABLE_CODE=1 -- D:\GitHub\RevitMCP\.venv\Scripts\python.exe D:\GitHub\RevitMCP\mcp_server\server.py
+```
+
+**Disable it** by re-adding without the variable (or removing it from your MCP
+config) and reconnecting — the tool then simply doesn't exist for the AI.
+
+Notes:
+- The gate lives in the MCP server (`server.py`); the add-in itself always
+  understands the `execute_code` command on its localhost-only port.
+- Code runs inside an auto-committed `Transaction`; an exception rolls the
+  model back.
+- The in-process CodeDom compiler is C# 5 only (no `$"..."` interpolation).
 
 ## Adding a new tool
 
