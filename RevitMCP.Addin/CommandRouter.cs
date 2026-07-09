@@ -50,6 +50,8 @@ namespace RevitMCP.Addin
                 case "list_levels":       return ListLevels(RequireDoc(uidoc));
                 case "list_family_types": return ListFamilyTypes(RequireDoc(uidoc), GetOptString(p, "category"),
                                                                  GetOptString(p, "contains"), GetIntOr(p, "limit", DefaultLimit));
+                case "list_families":     return ListFamilies(RequireDoc(uidoc), GetOptString(p, "contains"),
+                                                              GetIntOr(p, "limit", 100));
                 case "get_view_elements": return GetViewElements(uidoc, GetOptLong(p, "view_id"), GetIntOr(p, "limit", 100));
                 case "export_view_image": return ExportViewImage(uidoc, GetOptLong(p, "view_id"), GetIntOr(p, "pixels", 1600));
 
@@ -69,6 +71,11 @@ namespace RevitMCP.Addin
                 case "create_grid":      return CreateGrid(uidoc, p);
                 case "create_room":      return CreateRoom(uidoc, p);
                 case "place_family_instance": return PlaceFamilyInstance(uidoc, p);
+                case "rename_element":     return RenameElement(uidoc, GetLong(p, "id"), GetString(p, "new_name"));
+                case "rename_family_type": return RenameFamilyType(uidoc, GetOptString(p, "type_name"),
+                                                                   GetString(p, "new_name"));
+                case "save_family_as":     return SaveFamilyAs(uidoc, GetString(p, "path"),
+                                                               GetBoolOr(p, "overwrite", false));
                 case "execute_code":     return ExecuteCode(app, GetString(p, "code"));
 
                 default:
@@ -357,6 +364,35 @@ namespace RevitMCP.Addin
             };
         }
 
+        private static Dictionary<string, object> ListFamilies(Document doc, string contains, int limit)
+        {
+            limit = ClampLimit(limit);
+            IEnumerable<Family> families = new FilteredElementCollector(doc)
+                .OfClass(typeof(Family)).Cast<Family>();
+            if (!string.IsNullOrEmpty(contains))
+                families = families.Where(f => f.Name.IndexOf(contains, StringComparison.OrdinalIgnoreCase) >= 0);
+
+            var page = families.OrderBy(f => f.Name).Take(limit + 1).ToList();
+            bool truncated = page.Count > limit;
+            var items = page.Take(limit)
+                .Select(f => new Dictionary<string, object>
+                {
+                    ["id"] = f.Id.Value,
+                    ["name"] = f.Name,
+                    ["category"] = f.FamilyCategory?.Name,
+                    ["typeCount"] = f.GetFamilySymbolIds().Count,
+                    ["isInPlace"] = f.IsInPlace,
+                    ["isEditable"] = f.IsEditable
+                })
+                .ToList();
+            return new Dictionary<string, object>
+            {
+                ["count"] = items.Count,
+                ["truncated"] = truncated,
+                ["families"] = items
+            };
+        }
+
         private static Dictionary<string, object> GetViewElements(UIDocument uidoc, long? viewId, int limit)
         {
             var doc = RequireDoc(uidoc);
@@ -469,7 +505,7 @@ namespace RevitMCP.Addin
             EnsureWritable();
             var doc = RequireDoc(uidoc);
             var view = GetView(uidoc, GetOptLong(p, "view_id"));
-            bool clear = p.ContainsKey("clear") && p["clear"] != null && Convert.ToBoolean(p["clear"]);
+            bool clear = GetBoolOr(p, "clear", false);
 
             var ogs = new OverrideGraphicSettings(); // empty settings = reset to defaults
             byte r = 0, g = 0, b = 0;
@@ -787,6 +823,116 @@ namespace RevitMCP.Addin
             return ElementSummary(inst);
         }
 
+        private static Dictionary<string, object> RenameElement(UIDocument uidoc, long id, string newName)
+        {
+            EnsureWritable();
+            var doc = RequireDoc(uidoc);
+            var el = doc.GetElement(new ElementId(id))
+                     ?? throw new McpException(McpException.NotFound, $"No element with id {id}.");
+            var oldName = el.Name;
+
+            using (var t = new Transaction(doc, $"MCP: rename to {newName}"))
+            {
+                t.Start();
+                try
+                {
+                    el.Name = newName;
+                }
+                catch (Autodesk.Revit.Exceptions.ArgumentException ex)
+                {
+                    // Duplicate or invalid name.
+                    throw new McpException(McpException.BadRequest,
+                        $"Cannot rename element {id} to '{newName}': {ex.Message}");
+                }
+                catch (Autodesk.Revit.Exceptions.InvalidOperationException ex)
+                {
+                    // This element kind's name is not settable.
+                    throw new McpException(McpException.Unsupported,
+                        $"The name of element {id} ({el.GetType().Name}) is read-only: {ex.Message}");
+                }
+                t.Commit();
+            }
+            return new Dictionary<string, object> { ["id"] = id, ["oldName"] = oldName, ["name"] = el.Name };
+        }
+
+        private static Dictionary<string, object> RenameFamilyType(UIDocument uidoc, string typeName, string newName)
+        {
+            EnsureWritable();
+            var doc = RequireDoc(uidoc);
+            if (!doc.IsFamilyDocument)
+                throw new McpException(McpException.Unsupported,
+                    "rename_family_type only works in a family document (family editor). In a project, " +
+                    "family types are elements: use rename_element with the id from list_family_types.");
+
+            var fm = doc.FamilyManager;
+            FamilyType target = null;
+            if (typeName != null)
+            {
+                foreach (FamilyType ft in fm.Types)
+                    if (string.Equals(ft.Name, typeName, StringComparison.OrdinalIgnoreCase)) { target = ft; break; }
+                if (target == null)
+                    throw new McpException(McpException.NotFound, $"This family has no type named '{typeName}'.");
+            }
+            else
+            {
+                target = fm.CurrentType
+                         ?? throw new McpException(McpException.NotFound,
+                             "This family has no current type; pass 'type_name' explicitly.");
+            }
+
+            var oldName = target.Name;
+            using (var t = new Transaction(doc, $"MCP: rename type to {newName}"))
+            {
+                t.Start();
+                if (fm.CurrentType != target) fm.CurrentType = target;
+                try
+                {
+                    fm.RenameCurrentType(newName);
+                }
+                catch (Autodesk.Revit.Exceptions.ArgumentException ex)
+                {
+                    throw new McpException(McpException.BadRequest,
+                        $"Cannot rename type '{oldName}' to '{newName}': {ex.Message}");
+                }
+                t.Commit();
+            }
+            return new Dictionary<string, object>
+            {
+                ["family"] = doc.Title,
+                ["oldName"] = oldName,
+                ["name"] = newName
+            };
+        }
+
+        private static Dictionary<string, object> SaveFamilyAs(UIDocument uidoc, string path, bool overwrite)
+        {
+            EnsureWritable();
+            var doc = RequireDoc(uidoc);
+            if (!doc.IsFamilyDocument)
+                throw new McpException(McpException.Unsupported,
+                    "save_family_as only works in a family document. A family's name IS its file name, " +
+                    "so saving under a new path is the API's way to rename the family itself. " +
+                    "To rename a family loaded in a project, use rename_element with the id from list_families.");
+            if (!Path.IsPathRooted(path) || !path.EndsWith(".rfa", StringComparison.OrdinalIgnoreCase))
+                throw new McpException(McpException.BadRequest, "'path' must be an absolute path ending in .rfa.");
+
+            var dir = Path.GetDirectoryName(path);
+            if (!Directory.Exists(dir))
+                throw new McpException(McpException.NotFound, $"Directory does not exist: {dir}");
+            if (!overwrite && File.Exists(path))
+                throw new McpException(McpException.BadRequest,
+                    $"File already exists: {path}. Pass overwrite=true to replace it.");
+
+            // SaveAs must run outside any transaction. The old file stays on disk;
+            // the open document switches to (and is now named after) the new path.
+            doc.SaveAs(path, new SaveAsOptions { OverwriteExistingFile = overwrite });
+            return new Dictionary<string, object>
+            {
+                ["title"] = doc.Title,
+                ["path"] = doc.PathName
+            };
+        }
+
         // ---- execute_code (dual-use: only exposed when the MCP server sets ---
         // ---- REVIT_MCP_ENABLE_CODE — see the README's warning section) -------
 
@@ -1081,6 +1227,13 @@ public static class McpDynamicCode
 
         private static int ClampLimit(int limit)
             => limit <= 0 ? DefaultLimit : Math.Min(limit, MaxLimit);
+
+        private static bool GetBoolOr(Dictionary<string, object> p, string key, bool fallback)
+        {
+            if (!p.ContainsKey(key) || p[key] == null) return fallback;
+            try { return Convert.ToBoolean(p[key]); }
+            catch { return fallback; }
+        }
 
         // [x, y] or [x, y, z] in millimeters -> XYZ in internal units (feet).
         // If z is omitted, defaultZFeet (already internal units) is used.

@@ -182,6 +182,14 @@ def list_family_types(category: str | None = None, contains: str | None = None,
 
 
 @mcp.tool()
+def list_families(contains: str | None = None, limit: int = 100) -> dict:
+    """List the family *definitions* present in the document (id, name,
+    category, typeCount, isInPlace) — not placed instances. Filter by a name
+    substring. Rename one with rename_element."""
+    return _call("list_families", {"contains": contains, "limit": limit})
+
+
+@mcp.tool()
 def get_view_elements(view_id: int | None = None, limit: int = 100) -> dict:
     """List the elements visible in a view (default: the active view), with a
     per-category count breakdown and up to `limit` element summaries."""
@@ -335,6 +343,34 @@ def place_family_instance(type_id: int, point: list[float],
     comes from list_family_types. Runs in a transaction."""
     return _call("place_family_instance",
                  {"type_id": type_id, "point": point, "level_id": level_id})
+
+
+@mcp.tool()
+def rename_element(element_id: int, new_name: str) -> dict:
+    """Rename a Revit element by setting its Name *property* (which
+    set_parameter cannot reach): families (ids from list_families), family
+    types in a project (ids from list_family_types), views, levels, grids,
+    materials, ... Fails with BAD_REQUEST if the name is taken or invalid.
+    Runs in a transaction."""
+    return _call("rename_element", {"id": element_id, "new_name": new_name})
+
+
+@mcp.tool()
+def rename_family_type(new_name: str, type_name: str | None = None) -> dict:
+    """FAMILY DOCUMENTS ONLY (family editor): rename a type of the family being
+    edited — these types live in the FamilyManager and have no element id.
+    `type_name` picks the type (default: the current one). In a *project*,
+    rename a family type with rename_element instead."""
+    return _call("rename_family_type", {"type_name": type_name, "new_name": new_name})
+
+
+@mcp.tool()
+def save_family_as(path: str, overwrite: bool = False) -> dict:
+    """FAMILY DOCUMENTS ONLY: save the open family under a new absolute .rfa
+    path. A family's own name IS its file name, so this is the API's way to
+    rename the family itself. The old file stays on disk; the open document
+    switches to the new path."""
+    return _call("save_family_as", {"path": path, "overwrite": overwrite})
 
 
 if ENABLE_CODE:

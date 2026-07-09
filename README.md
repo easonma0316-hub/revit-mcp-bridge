@@ -70,6 +70,7 @@ Two Revit hard rules this design satisfies:
 | `get_active_view` | read | The active view |
 | `list_levels` | read | Levels with elevations |
 | `list_family_types` | read | Loadable family types (for `place_family_instance`) |
+| `list_families` | read | Family definitions in the document (for `rename_element`) |
 | `get_view_elements` | read | Elements visible in a view, with per-category counts |
 | `export_view_image` | read | Export a view as PNG and return the file path |
 | `set_parameter` | write | Set a parameter on one or many elements (one transaction) |
@@ -87,6 +88,9 @@ Two Revit hard rules this design satisfies:
 | `create_grid` | write | Straight grid line |
 | `create_room` | write | Room at a point (0 m² result = not enclosed) |
 | `place_family_instance` | write | Place a loadable family instance at a point |
+| `rename_element` | write | Set an element's Name property (families, types, views, levels, …) |
+| `rename_family_type` | write | Rename a FamilyManager type (family documents only) |
+| `save_family_as` | write | Save the open family to a new .rfa — renames the family itself |
 
 All lengths and coordinates cross the API in **millimeters** (the add-in
 converts to Revit's internal feet); parameter values use the model's **display
