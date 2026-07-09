@@ -1,0 +1,46 @@
+# Builds the add-in and publishes a downloadable release when you push a version
+# tag (e.g. `git tag v0.1.0 && git push origin v0.1.0`). End users then grab the
+# zip and run install.ps1 — no .NET SDK or building on their side.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # required for the GITHUB_TOKEN to create a release
+
+jobs:
+  release:
+    name: Build add-in and publish release
+    runs-on: windows-latest # net48 is Windows-only
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Build add-in (Release)
+        run: dotnet build RevitMCP.Addin/RevitMCP.Addin.csproj -c Release
+
+      - name: Package add-in + installer
+        shell: pwsh
+        run: |
+          $stage = "dist/RevitMCP-addin"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item RevitMCP.Addin/bin/Release/RevitMCP.Addin.dll $stage
+          Copy-Item RevitMCP.Addin/RevitMCP.addin $stage
+          Copy-Item install.ps1 $stage
+          Compress-Archive -Path "$stage/*" -DestinationPath "dist/RevitMCP-addin.zip" -Force
+
+      - name: Create GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create $env:GITHUB_REF_NAME `
+            dist/RevitMCP-addin.zip `
+            --title "RevitMCP $env:GITHUB_REF_NAME" `
+            --generate-notes

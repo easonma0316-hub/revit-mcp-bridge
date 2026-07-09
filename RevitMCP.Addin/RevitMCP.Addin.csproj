@@ -19,16 +19,31 @@
     <Reference Include="System.Web.Extensions" />
   </ItemGroup>
 
-  <!-- Revit 2024 API. Private=false => do NOT copy these into the output. -->
+  <!-- Revit 2024 API via NuGet (Nice3point repackages the real Revit assemblies).
+       This lets the project build anywhere - including CI, which has no Revit
+       install - while staying identical to the official DLLs.
+
+       ExcludeAssets="runtime" + PrivateAssets="all" = compile-only: the DLLs are
+       NOT copied into bin (Revit loads its own copy at runtime), equivalent to the
+       old <Private>false</Private>.
+
+       Pinned to 2024.* so the API surface matches Revit 2024. To target another
+       year, change both versions (e.g. 2025.*).
+
+       To go back to a local install instead, delete these two PackageReferences
+       and restore the HintPath references:
+         <Reference Include="RevitAPI">
+           <HintPath>C:\Program Files\Autodesk\Revit 2024\RevitAPI.dll</HintPath>
+           <Private>false</Private>
+         </Reference>
+         <Reference Include="RevitAPIUI">
+           <HintPath>C:\Program Files\Autodesk\Revit 2024\RevitAPIUI.dll</HintPath>
+           <Private>false</Private>
+         </Reference>
+  -->
   <ItemGroup>
-    <Reference Include="RevitAPI">
-      <HintPath>C:\Program Files\Autodesk\Revit 2024\RevitAPI.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
-    <Reference Include="RevitAPIUI">
-      <HintPath>C:\Program Files\Autodesk\Revit 2024\RevitAPIUI.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
+    <PackageReference Include="Nice3point.Revit.Api.RevitAPI" Version="2024.0.0" ExcludeAssets="runtime" PrivateAssets="all" />
+    <PackageReference Include="Nice3point.Revit.Api.RevitAPIUI" Version="2024.0.0" ExcludeAssets="runtime" PrivateAssets="all" />
   </ItemGroup>
 
 </Project>
