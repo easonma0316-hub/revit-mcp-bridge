@@ -518,8 +518,8 @@ namespace RevitMCP.Addin
 
         private static Dictionary<string, object> IsolateElements(UIDocument uidoc, Dictionary<string, object> p)
         {
-            // Temporary isolate is a transient view state (no transaction), so it is
-            // allowed in read-only mode.
+            // Temporary isolate is a transient view state, so it stays allowed in
+            // read-only mode — but Revit still demands a transaction to set it.
             var doc = RequireDoc(uidoc);
             var view = uidoc.ActiveView
                        ?? throw new McpException(McpException.NotFound, "No active view.");
@@ -529,8 +529,12 @@ namespace RevitMCP.Addin
                 .Where(eid => doc.GetElement(eid) != null)
                 .ToList();
 
-            // Temporary isolate is a view state, not a document change — no transaction.
-            view.IsolateElementsTemporary(ids);
+            using (var t = new Transaction(doc, "MCP: isolate elements"))
+            {
+                t.Start();
+                view.IsolateElementsTemporary(ids);
+                t.Commit();
+            }
             return new Dictionary<string, object>
             {
                 ["view"] = view.Name,
@@ -541,10 +545,15 @@ namespace RevitMCP.Addin
 
         private static Dictionary<string, object> ResetView(UIDocument uidoc)
         {
-            RequireDoc(uidoc);
+            var doc = RequireDoc(uidoc);
             var view = uidoc.ActiveView
                        ?? throw new McpException(McpException.NotFound, "No active view.");
-            view.DisableTemporaryViewMode(TemporaryViewMode.TemporaryHideIsolate);
+            using (var t = new Transaction(doc, "MCP: reset view"))
+            {
+                t.Start();
+                view.DisableTemporaryViewMode(TemporaryViewMode.TemporaryHideIsolate);
+                t.Commit();
+            }
             return new Dictionary<string, object> { ["view"] = view.Name, ["reset"] = true };
         }
 
