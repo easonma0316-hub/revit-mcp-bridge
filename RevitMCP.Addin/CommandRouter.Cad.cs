@@ -467,6 +467,7 @@ namespace RevitMCP.Addin
             // ---- 2. pair parallel segments at a wall thickness apart ----------
             double maxT = thicknesses.Max() + tol;
             var pieces = new List<WallPiece>();
+            int patternSegs = 0, midlinePairs = 0;
             var byAngle = segs.OrderBy(s => s.Angle).ToList();
 
             // Group by direction. Angles near 180 wrap to near 0: treat those as one group
@@ -506,6 +507,38 @@ namespace RevitMCP.Addin
                     s.T1 = Math.Min(t1, t2); s.T2 = Math.Max(t1, t2);
                 }
                 var sorted = g.OrderBy(s => s.Offset).ToList();
+
+                // Regularly spaced parallel lines of similar length (stair treads, ramps,
+                // gratings, hatch) are a pattern, not walls: a segment with >= 3 similar
+                // neighbours at multiples of one spacing (>= thinnest wall) is excluded.
+                double minSpacing = thicknesses.Min() - tol;
+                var pattern = new HashSet<Seg>();
+                for (int i = 0; i < sorted.Count; i++)
+                {
+                    var a = sorted[i]; var la = a.T2 - a.T1;
+                    var neigh = new List<double>();
+                    for (int j = i - 1; j >= 0 && a.Offset - sorted[j].Offset <= 3 * maxT; j--) AddNeighbour(sorted[j]);
+                    for (int j = i + 1; j < sorted.Count && sorted[j].Offset - a.Offset <= 3 * maxT; j++) AddNeighbour(sorted[j]);
+                    void AddNeighbour(Seg n)
+                    {
+                        var d = Math.Abs(n.Offset - a.Offset);
+                        if (d < minSpacing) return;
+                        var ln = n.T2 - n.T1;
+                        if (Math.Abs(ln - la) > 0.15 * Math.Max(ln, la)) return;
+                        var ov = Math.Min(a.T2, n.T2) - Math.Max(a.T1, n.T1);
+                        if (ov < 0.5 * la) return;
+                        neigh.Add(d);
+                    }
+                    if (neigh.Count < 4) continue;
+                    var spacing = neigh.Min();
+                    var ks = neigh.Select(d => new { d, k = Math.Round(d / spacing) })
+                                  .Where(x => x.k >= 1 && x.k <= 6 && Math.Abs(x.d - x.k * spacing) <= 2 * tol).Select(x => (int)x.k).ToList();
+                    // >= 4 equally spaced neighbours including the 1x and 2x steps: a comb
+                    if (ks.Count >= 4 && ks.Contains(1) && ks.Contains(2)) pattern.Add(a);
+                }
+                patternSegs += pattern.Count;
+                if (pattern.Count > 0) sorted = sorted.Where(x => !pattern.Contains(x)).ToList();
+
                 var candidates = new List<PairCandidate>();
                 for (int i = 0; i < sorted.Count; i++)
                 {
@@ -548,11 +581,35 @@ namespace RevitMCP.Addin
                     }
                 }
 
+                // 3-line convention (face, centreline, face): once (face, face) is a
+                // candidate, the two (face, centreline) halves are not walls.
+                var bySeg = new Dictionary<Seg, List<PairCandidate>>();
+                foreach (var c in candidates)
+                {
+                    if (!bySeg.TryGetValue(c.A, out var la)) bySeg[c.A] = la = new List<PairCandidate>();
+                    la.Add(c);
+                    if (!bySeg.TryGetValue(c.B, out var lb)) bySeg[c.B] = lb = new List<PairCandidate>();
+                    lb.Add(c);
+                }
+                var suppressed = new HashSet<PairCandidate>();
+                foreach (var c in candidates)
+                {
+                    var mid = (c.A.Offset + c.B.Offset) / 2;
+                    foreach (var q in bySeg[c.A].Concat(bySeg[c.B]))
+                    {
+                        if (q == c) continue;
+                        var other = q.A == c.A || q.A == c.B ? q.B : q.A;
+                        if (Math.Abs(other.Offset - mid) <= tol) suppressed.Add(q);
+                    }
+                }
+                midlinePairs += suppressed.Count;
+
                 // Faces of one polyline outline belong together: accept those first, then
                 // cross-entity pairs only where at least one face is still unclaimed
                 // (kills the phantom "wall" between two back-to-back outlines).
                 foreach (var c in candidates.OrderByDescending(c => c.SameSource).ThenByDescending(c => c.Hi - c.Lo))
                 {
+                    if (suppressed.Contains(c)) continue;
                     if (!c.SameSource && Claimed(c.A, c.Lo, c.Hi) && Claimed(c.B, c.Lo, c.Hi)) continue;
                     if (c.SameSource)
                     {
@@ -1020,6 +1077,8 @@ namespace RevitMCP.Addin
                     ["other_skipped"] = otherCount, ["segments"] = segs.Count
                 },
                 ["pairs"] = pieces.Count,
+                ["pattern_segments_excluded"] = patternSegs,
+                ["centreline_pairs_suppressed"] = midlinePairs,
                 ["unpaired_segments"] = unpaired,
                 ["unpaired_examples"] = GetBoolOr(p, "report_unpaired", false)
                     ? unpairedSegs.OrderByDescending(s => (s.X2 - s.X1) * (s.X2 - s.X1) + (s.Y2 - s.Y1) * (s.Y2 - s.Y1)).Take(GetIntOr(p, "report_limit", 100))
