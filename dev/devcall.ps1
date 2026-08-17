@@ -24,7 +24,8 @@ param(
     [Parameter(Mandatory)][string]$Command,
     [string]$ParamsJson = '{}',
     [int]$RevitYear = 2026,
-    [string]$Url = 'http://127.0.0.1:8765/'
+    [string]$Url = 'http://127.0.0.1:8765/',
+    [int]$TimeoutSec = 900
 )
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 $repo = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
@@ -46,6 +47,8 @@ catch (System.Reflection.TargetInvocationException ex) { throw ex.InnerException
 var ser = jsonT.GetMethod("Serialize", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public);
 return (string)ser.Invoke(null, new object[] { result });
 "@
-$body = @{ command = "execute_code"; params = @{ code = $code } } | ConvertTo-Json -Depth 5
-$r = Invoke-RestMethod $Url -Method Post -Body $body -ContentType "application/json"
+$body = @{ command = "execute_code"; params = @{ code = $code }; timeout_ms = $TimeoutSec * 1000 } | ConvertTo-Json -Depth 5
+# Send explicit UTF-8 bytes: PowerShell 5.1 would otherwise encode non-ASCII (e.g. Chinese layer names) in the ANSI code page.
+$bytes = [Text.Encoding]::UTF8.GetBytes($body)
+$r = Invoke-RestMethod $Url -Method Post -Body $bytes -ContentType "application/json; charset=utf-8" -TimeoutSec ($TimeoutSec + 5)
 if (-not $r.ok) { "ERROR [$($r.code)]: $($r.error)" } else { $r.result.result | ConvertFrom-Json | ConvertTo-Json -Depth 12 }

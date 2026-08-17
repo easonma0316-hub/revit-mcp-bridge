@@ -13,6 +13,9 @@ Environment:
     REVIT_MCP_URL          add-in listener URL (default http://127.0.0.1:8765/).
                            If Revit bound a fallback port, set this to match.
     REVIT_MCP_TIMEOUT      per-request HTTP timeout in seconds (default 65).
+    REVIT_MCP_BATCH_TIMEOUT timeout for batch commands such as
+                           create_walls_from_cad / create_doors_from_cad with
+                           dry_run=False (default 900).
     REVIT_MCP_ENABLE_CODE  "1" registers the execute_code tool (arbitrary C#
                            inside Revit). Off by default — see the README.
 
@@ -28,6 +31,8 @@ REVIT_URL = os.environ.get("REVIT_MCP_URL", "http://127.0.0.1:8765/")
 # Slightly above the add-in's UI-thread timeout (60s) so the transport doesn't
 # give up before Revit does.
 TIMEOUT = float(os.environ.get("REVIT_MCP_TIMEOUT", "65"))
+# Batch commands (whole floors of walls/doors) run ~1 min per 1000 elements.
+BATCH_TIMEOUT = float(os.environ.get("REVIT_MCP_BATCH_TIMEOUT", "900"))
 
 # Opt-in gate for the execute_code tool (arbitrary C# inside Revit). Off by
 # default; set REVIT_MCP_ENABLE_CODE=1 in the MCP server's env to enable it.
@@ -44,11 +49,18 @@ class RevitError(RuntimeError):
         super().__init__(f"[{code}] {message}")
 
 
-def _call(command: str, params: dict | None = None) -> dict:
-    """POST one command to the add-in and return its result, or raise."""
+def _call(command: str, params: dict | None = None,
+          timeout: float | None = None) -> dict:
+    """POST one command to the add-in and return its result, or raise.
+    `timeout` (seconds) overrides the default for long batch commands; it is
+    also sent to the add-in so its UI-thread wait matches."""
     payload = {"command": command, "params": params or {}}
+    http_timeout = TIMEOUT
+    if timeout is not None:
+        payload["timeout_ms"] = int(timeout * 1000)
+        http_timeout = timeout + 5
     try:
-        with httpx.Client(timeout=TIMEOUT) as client:
+        with httpx.Client(timeout=http_timeout) as client:
             resp = client.post(REVIT_URL, json=payload)
             resp.raise_for_status()
             data = resp.json()
@@ -62,7 +74,7 @@ def _call(command: str, params: dict | None = None) -> dict:
     except httpx.TimeoutException as exc:
         raise RevitError(
             "TIMEOUT",
-            f"Revit did not respond within {TIMEOUT}s. It may be busy or showing "
+            f"Revit did not respond within {http_timeout}s. It may be busy or showing "
             "a modal dialog that is blocking its UI thread.",
         ) from exc
     except httpx.HTTPError as exc:
@@ -427,7 +439,8 @@ def create_walls_from_cad(link_id: int, layers: list[str], level_id: int,
         "type_map": type_map, "door_layers": door_layers,
         "max_opening_mm": max_opening_mm, "snap_ends": snap_ends,
         "create_missing_types": create_missing_types, "ai_tag": ai_tag,
-        "base_type_id": base_type_id, "max_walls": max_walls})
+        "base_type_id": base_type_id, "max_walls": max_walls},
+        timeout=None if dry_run else BATCH_TIMEOUT)
 
 
 @mcp.tool()
@@ -475,7 +488,8 @@ def create_doors_from_cad(link_id: int, layers: list[str], level_id: int,
         "width_step_mm": width_step_mm, "ai_tag": ai_tag,
         "host_tolerance_mm": host_tolerance_mm,
         "min_single_width_mm": min_single_width_mm,
-        "skip_existing": skip_existing})
+        "skip_existing": skip_existing},
+        timeout=None if dry_run else BATCH_TIMEOUT)
 
 
 @mcp.tool()

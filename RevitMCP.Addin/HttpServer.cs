@@ -10,7 +10,7 @@ namespace RevitMCP.Addin
     /// <summary>
     /// Minimal JSON-over-HTTP listener on a background thread.
     ///
-    /// POST /  body: { "command": "...", "params": { ... } }
+    /// POST /  body: { "command": "...", "params": { ... }, "timeout_ms": 600000 (optional) }
     ///         -> { "ok": true, "result": {...} }  or
     ///            { "ok": false, "error": "...", "code": "..." }
     ///
@@ -125,7 +125,13 @@ namespace RevitMCP.Addin
                 }
 
                 Log.Info($"-> {command}");
-                var result = _dispatcher.Execute(command, parameters, Config.CommandTimeoutMs);
+                // Long batch commands (e.g. a whole floor of walls) may ask for more time.
+                int timeoutMs = Config.CommandTimeoutMs;
+                if (request.ContainsKey("timeout_ms") && request["timeout_ms"] != null)
+                {
+                    try { timeoutMs = Math.Max(1000, Convert.ToInt32(request["timeout_ms"])); } catch { /* keep default */ }
+                }
+                var result = _dispatcher.Execute(command, parameters, timeoutMs);
                 WriteJson(ctx, 200, new Dictionary<string, object> { ["ok"] = true, ["result"] = result });
             }
             catch (McpException ex)

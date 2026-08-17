@@ -501,12 +501,16 @@ namespace RevitMCP.Addin
                         if (hi - lo < minLen) continue;
 
                         // Two wall faces have nothing between them: reject the pair if a
-                        // third parallel segment runs between a and b over this range.
+                        // third parallel segment runs between a and b over this range AND
+                        // is far enough from both faces to be a wall face itself. Finish /
+                        // plaster lines hugging a face (closer than the thinnest wall) are
+                        // ignored so a 250 outline with 44 mm inner lines still pairs.
+                        double minFace = thicknesses.Min() - tol;
                         bool blocked = false;
                         for (int k = i + 1; k < j && !blocked; k++)
                         {
                             var c = sorted[k];
-                            if (c.Offset <= a.Offset + tol || c.Offset >= b.Offset - tol) continue;
+                            if (c.Offset - a.Offset < minFace || b.Offset - c.Offset < minFace) continue;
                             var ov = Math.Min(hi, c.T2) - Math.Max(lo, c.T1);
                             if (ov > 0.3 * (hi - lo)) blocked = true;
                         }
@@ -569,6 +573,35 @@ namespace RevitMCP.Addin
                 FlushLane();
             }
             merged = merged.Where(w => w.T2 - w.T1 >= minLen).ToList();
+
+            // ---- 3a. drop near-duplicates: a piece running (almost) on top of a longer
+            // one - same direction, centerlines closer than half a thickness, >= 80 %
+            // covered - is CAD clutter (finish lines pairing with faces), not a wall.
+            int dedup = 0;
+            {
+                var kept = new List<WallPiece>();
+                foreach (var w in merged.OrderByDescending(w => (w.T2 - w.T1) * 1000 + w.Thickness))
+                {
+                    bool dup = false;
+                    foreach (var k in kept)
+                    {
+                        if (Math.Abs(k.Dx * w.Dx + k.Dy * w.Dy) < 0.9999) continue; // different direction
+                        // express w's centerline offset in k's frame (frames may be flipped)
+                        var wx = w.Nx * w.Offset; var wy = w.Ny * w.Offset;
+                        var off = k.Nx * wx + k.Ny * wy;
+                        if (Math.Abs(off - k.Offset) > Math.Max(k.Thickness, w.Thickness) / 2) continue;
+                        // param range of w in k's frame
+                        var sx = w.Dx * w.T1 + wx; var sy = w.Dy * w.T1 + wy;
+                        var ex = w.Dx * w.T2 + wx; var ey = w.Dy * w.T2 + wy;
+                        var t1 = k.Dx * sx + k.Dy * sy; var t2 = k.Dx * ex + k.Dy * ey;
+                        var lo = Math.Min(t1, t2); var hi = Math.Max(t1, t2);
+                        var cover = Math.Min(hi, k.T2) - Math.Max(lo, k.T1);
+                        if (cover >= 0.8 * (hi - lo)) { dup = true; break; }
+                    }
+                    if (dup) dedup++; else kept.Add(w);
+                }
+                merged = kept;
+            }
 
             // ---- 3b. snap ends to the centerline of the wall they run into ------
             // CAD faces stop at the *face* of the crossing wall, so a centerline ends
@@ -652,6 +685,52 @@ namespace RevitMCP.Addin
                 }
             }
 
+            // ---- 3d. skip walls that already exist (re-runs / overlapping regions) ---
+            int skippedExisting = 0;
+            if (GetBoolOr(p, "skip_existing", true))
+            {
+                double snapD = GetDoubleOr(p, "existing_tolerance_mm", 100.0);
+                var existing = new List<double[]>();   // x1,y1,x2,y2 (mm) of straight walls on this level
+                var existingArcs = new List<double[]>(); // cx,cy,r,a0,a1
+                foreach (var w in new FilteredElementCollector(doc).OfClass(typeof(Wall)).Cast<Wall>())
+                {
+                    if (w.LevelId != level.Id || !(w.Location is LocationCurve lc)) continue;
+                    if (lc.Curve is Line ln)
+                        existing.Add(new[] { FtToMm(ln.GetEndPoint(0).X), FtToMm(ln.GetEndPoint(0).Y), FtToMm(ln.GetEndPoint(1).X), FtToMm(ln.GetEndPoint(1).Y) });
+                    else if (lc.Curve is Arc ea)
+                        existingArcs.Add(new[] { FtToMm(ea.Center.X), FtToMm(ea.Center.Y), FtToMm(ea.Radius),
+                                                 FtToMm(ea.GetEndPoint(0).X), FtToMm(ea.GetEndPoint(0).Y), FtToMm(ea.GetEndPoint(1).X), FtToMm(ea.GetEndPoint(1).Y) });
+                }
+                bool Near(double ax, double ay, double bx, double by) => Math.Abs(ax - bx) <= snapD && Math.Abs(ay - by) <= snapD;
+                if (existing.Count > 0)
+                {
+                    var keep = new List<WallPiece>();
+                    foreach (var w in merged)
+                    {
+                        var sx = w.Dx * w.T1 + w.Nx * w.Offset; var sy = w.Dy * w.T1 + w.Ny * w.Offset;
+                        var ex = w.Dx * w.T2 + w.Nx * w.Offset; var ey = w.Dy * w.T2 + w.Ny * w.Offset;
+                        bool dup = existing.Any(e => (Near(sx, sy, e[0], e[1]) && Near(ex, ey, e[2], e[3])) ||
+                                                     (Near(sx, sy, e[2], e[3]) && Near(ex, ey, e[0], e[1])));
+                        if (dup) skippedExisting++; else keep.Add(w);
+                    }
+                    merged = keep;
+                }
+                if (existingArcs.Count > 0)
+                {
+                    var keep = new List<CurvedPiece>();
+                    foreach (var c in curved)
+                    {
+                        double sx = c.Cx + c.R * Math.Cos(c.A0), sy = c.Cy + c.R * Math.Sin(c.A0);
+                        double ex = c.Cx + c.R * Math.Cos(c.A1), ey = c.Cy + c.R * Math.Sin(c.A1);
+                        bool dup = existingArcs.Any(e => Math.Abs(e[2] - c.R) <= snapD &&
+                                                         ((Near(sx, sy, e[3], e[4]) && Near(ex, ey, e[5], e[6])) ||
+                                                          (Near(sx, sy, e[5], e[6]) && Near(ex, ey, e[3], e[4]))));
+                        if (dup) skippedExisting++; else keep.Add(c);
+                    }
+                    curved = keep;
+                }
+            }
+
             if (!dryRun && merged.Count + curved.Count > maxWalls)
                 throw new McpException(McpException.BadRequest,
                     $"{merged.Count + curved.Count} walls would be created (max_walls={maxWalls}). Narrow bbox_mm or raise max_walls.");
@@ -685,7 +764,12 @@ namespace RevitMCP.Addin
                     var nearest = basicTypes.OrderBy(t => Math.Abs(FtToMm(t.Width) - thick)).First();
                     var diff = Math.Abs(FtToMm(nearest.Width) - thick);
                     int uses = thicknessCounts.TryGetValue(thick, out var n1) ? n1 : 0;
-                    if (diff <= typeTol) chosen = nearest;
+                    // Reuse within type_tolerance_mm, unless the existing type's width is itself a
+                    // *different* nominal thickness (240 must not borrow the 250 type; a 95 mm
+                    // partition may serve 100 mm walls because 95 is not a nominal value).
+                    var nearestW = FtToMm(nearest.Width);
+                    bool otherNominal = thicknesses.Any(tk => Math.Abs(tk - nearestW) <= tol && Math.Abs(tk - thick) > tol);
+                    if (diff <= typeTol && !otherNominal) chosen = nearest;
                     else if (createTypes && uses < minPerType)
                     {
                         chosen = nearest;
@@ -864,6 +948,8 @@ namespace RevitMCP.Addin
                 ["ends_snapped"] = snapped,
                 ["ends_extended_over_openings"] = extended,
                 ["walls_planned"] = merged.Count + curved.Count,
+                ["skipped_existing"] = skippedExisting,
+                ["dropped_duplicates"] = dedup,
                 ["walls_created"] = dryRun ? 0 : walls.Count,
                 ["walls"] = walls,
                 ["failures"] = failures,
