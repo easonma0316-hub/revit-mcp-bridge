@@ -56,6 +56,7 @@ Two Revit hard rules this design satisfies:
 | `RevitMCP.Addin/CommandRouter.cs` | Command → Revit API action (**add tools here**) |
 | `RevitMCP.Addin/CommandRouter.Cad.cs` | CAD-link tools: layer stats, geometry export, walls from wall layers |
 | `RevitMCP.Addin/CommandRouter.CadDoors.cs` | Doors from door swing arcs (hosted on the walls above) |
+| `RevitMCP.Addin/CommandRouter.CadColumns.cs` | Columns from rectangles / circles on a column layer |
 | `RevitMCP.Addin/Json.cs` | JSON layer (JavaScriptSerializer on net48, System.Text.Json on net8) |
 | `RevitMCP.Addin/DynamicCompiler.cs` | `execute_code` compiler (CodeDom on net48, Roslyn on net8) |
 | `dev/devcall.ps1` | Dev helper: run a command from a freshly built DLL inside a running Revit 2025+ (no restart) |
@@ -101,7 +102,8 @@ Two Revit hard rules this design satisfies:
 | `get_cad_geometry` | read | Raw curves of chosen CAD layers in mm (lines/arcs/polylines), bbox-filtered |
 | `create_walls_from_cad` | write | Wall layer(s) → paired faces → centerlines → `Wall.Create` (dry-run first) |
 | `create_doors_from_cad` | write | Door swing arcs → hosted doors with correct hand/facing, types auto-created by width |
-| `snapshot_region` | read | PNG of a plan region (bbox in mm) — look at CAD vs. modelled result |
+| `create_columns_from_cad` | write | Column rectangles/circles → structural (or architectural) columns, types by size |
+| `snapshot_region` | read | PNG of a plan region (bbox in mm; highlight walls/doors, hide the DWG) — look at CAD vs. modelled result |
 
 All lengths and coordinates cross the API in **millimeters** (the add-in
 converts to Revit's internal feet); parameter values use the model's **display
@@ -133,9 +135,11 @@ Workflow, on a floor plan whose DWG has separate wall / door layers:
    to a 100 mm grid and one type per value is duplicated from the nearest type
    (`W1200 x H2100_AI`).
 
-5. `snapshot_region(bbox_mm=...)` → open the PNG and compare the modelled walls
-   /doors with the CAD lines; fix by hand or re-run with different layers /
-   tolerances.
+5. `create_columns_from_cad(link_id, layers=["A-COLUMN"], level_id, height_mm)`
+   for the column layer (rectangles + circles).
+6. `snapshot_region(bbox_mm=..., highlight=True, hide_links=True)` → open the
+   PNG and compare the modelled walls/doors/columns with the CAD; fix by hand
+   or re-run with different layers / tolerances.
 
 Work region by region (`bbox_mm`), always dry-run first, and do it on a
 detached copy while tuning tolerances/type maps.

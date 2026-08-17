@@ -493,20 +493,65 @@ def create_doors_from_cad(link_id: int, layers: list[str], level_id: int,
 
 
 @mcp.tool()
+def create_columns_from_cad(link_id: int, layers: list[str], level_id: int,
+                            height_mm: float | None = None,
+                            top_level_id: int | None = None,
+                            bbox_mm: list[list[float]] | None = None,
+                            dry_run: bool = True,
+                            structural: bool = True,
+                            rect_family: str | None = None,
+                            round_family: str | None = None,
+                            size_step_mm: float = 50.0,
+                            size_tolerance_mm: float = 25.0,
+                            create_missing_types: bool = True,
+                            ai_tag: str = "_AI",
+                            skip_existing: bool = True) -> dict:
+    """Place columns from a CAD column layer: every closed 4-corner rectangle
+    (perpendicular sides) becomes a rectangular column (longer side = Width,
+    rotated to match), every circle (or arcs closing a full turn) a round
+    column. Structural columns by default (`structural=False` for
+    architectural). Families are picked by name hint (Rectangular/矩形,
+    Circular/圆) or `rect_family` / `round_family` substrings; the family must
+    expose Width+Depth or Radius/Diameter type parameters. Sizes are rounded to
+    `size_step_mm`; a type within `size_tolerance_mm` is reused, else one is
+    duplicated from the nearest type and named by its convention
+    ("1000x1000mm" -> "600x500mm_AI"; circular "1000mm" is a RADIUS ->
+    "125mm_AI" for a 250 mm column) with Type Comments marking it AI-made.
+    Extent: base = `level_id`, top = `top_level_id` or base + `height_mm`.
+    Duplicated footprints in the drawing and columns already in the model
+    (within 100 mm) are skipped. dry_run=True first to see the plan."""
+    return _call("create_columns_from_cad", {
+        "link_id": link_id, "layers": layers, "level_id": level_id,
+        "height_mm": height_mm, "top_level_id": top_level_id,
+        "bbox_mm": bbox_mm, "dry_run": dry_run, "structural": structural,
+        "rect_family": rect_family, "round_family": round_family,
+        "size_step_mm": size_step_mm, "size_tolerance_mm": size_tolerance_mm,
+        "create_missing_types": create_missing_types, "ai_tag": ai_tag,
+        "skip_existing": skip_existing},
+        timeout=None if dry_run else BATCH_TIMEOUT)
+
+
+@mcp.tool()
 def snapshot_region(bbox_mm: list[list[float]], pixels: int = 1600,
                     view_id: int | None = None,
-                    hide_categories: list[str] | None = None) -> dict:
+                    hide_categories: list[str] | None = None,
+                    hide_links: bool = False,
+                    highlight: bool = True) -> dict:
     """Export a PNG of a rectangular region [[xmin, ymin], [xmax, ymax]] (mm) of
     a floor plan and return its file path - LOOK at it (open the image) to
-    check what was modelled against the CAD: Revit walls appear filled, CAD
-    lines in their layer colours, doors with swing lines. Uses the active plan
-    view by default (the UI is zoomed to the region and restored afterwards);
-    `view_id` may name another floor plan. `hide_categories` (e.g.
-    ["Furniture", "Text Notes"]) hides clutter for the shot only. Use it after
-    create_walls_from_cad / create_doors_from_cad on the region you built."""
+    check what was modelled against the CAD. Rendered from a temporary cropped
+    copy of the plan (never stale). `view_id` names a floor plan (default: the
+    active view, which must be a plan). `highlight=True` paints walls red, doors
+    blue, windows green so they stand out from the CAD; `hide_links=True` hides
+    the DWG so only Revit elements show; `hide_categories` (e.g. ["Grids",
+    "Text Notes"]) hides clutter for the shot only. Use it after
+    create_walls_from_cad / create_doors_from_cad / create_columns_from_cad on
+    the region you built."""
     return _call("snapshot_region", {"bbox_mm": bbox_mm, "pixels": pixels,
                                      "view_id": view_id,
-                                     "hide_categories": hide_categories})
+                                     "hide_categories": hide_categories,
+                                     "hide_links": hide_links,
+                                     "highlight": highlight})
 
 
 @mcp.tool()
