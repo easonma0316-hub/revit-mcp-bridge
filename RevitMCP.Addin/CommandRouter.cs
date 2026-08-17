@@ -85,6 +85,7 @@ namespace RevitMCP.Addin
                 case "create_walls_from_cad": return CreateWallsFromCad(uidoc, p);
                 case "create_doors_from_cad": return CreateDoorsFromCad(uidoc, p);
                 case "snapshot_region":       return SnapshotRegion(uidoc, p);
+                case "create_columns_from_cad": return CreateColumnsFromCad(uidoc, p);
 
                 default:
                     throw new McpException(McpException.UnknownCommand, $"Unknown command: {command}");

@@ -736,8 +736,11 @@ namespace RevitMCP.Addin
                         for (int k = i + 1; k < list.Count; k++)
                         {
                             var a = list[i]; var b = list[k];
-                            if (b.Offset - a.Offset > laneTol) break;
+                            // walls of different thickness usually share one face, so their
+                            // centerlines sit half the thickness difference apart
+                            if (b.Offset - a.Offset > laneTol + maxT / 2) break;
                             if (a.Thickness == b.Thickness) continue;
+                            if (b.Offset - a.Offset > laneTol + Math.Abs(a.Thickness - b.Thickness) / 2) continue;
                             WallPiece lo = a.T2 <= b.T1 ? a : b, hi = lo == a ? b : a;
                             var gap = hi.T1 - lo.T2;
                             if (gap <= 0 || gap > maxOpening) continue;
