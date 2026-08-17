@@ -170,7 +170,7 @@ namespace RevitMCP.Addin
             try
             {
                 ctx.Response.StatusCode = status;
-                ctx.Response.ContentType = "application/json";
+                ctx.Response.ContentType = "application/json; charset=utf-8";
                 ctx.Response.ContentLength64 = buffer.Length;
                 ctx.Response.OutputStream.Write(buffer, 0, buffer.Length);
             }

@@ -25,7 +25,7 @@ namespace RevitMCP.Addin
     ///  - lengths/coordinates cross the API in millimeters (converted to Revit's
     ///    internal feet here); parameter values use the model's display units.
     /// </summary>
-    public static class CommandRouter
+    public static partial class CommandRouter
     {
         private const int DefaultLimit = 200;
         private const int MaxLimit = 5000;
@@ -77,6 +77,13 @@ namespace RevitMCP.Addin
                 case "save_family_as":     return SaveFamilyAs(uidoc, GetString(p, "path"),
                                                                GetBoolOr(p, "overwrite", false));
                 case "execute_code":     return ExecuteCode(app, GetString(p, "code"));
+
+                // ---- CAD link driven modelling (CommandRouter.Cad.cs) -----------
+                case "list_cad_links":        return ListCadLinks(RequireDoc(uidoc), GetBoolOr(p, "include_layers", true),
+                                                                   GetIntOr(p, "layer_limit", 200));
+                case "get_cad_geometry":      return GetCadGeometry(RequireDoc(uidoc), p);
+                case "create_walls_from_cad": return CreateWallsFromCad(uidoc, p);
+                case "create_doors_from_cad": return CreateDoorsFromCad(uidoc, p);
 
                 default:
                     throw new McpException(McpException.UnknownCommand, $"Unknown command: {command}");

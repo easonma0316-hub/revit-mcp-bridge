@@ -54,6 +54,11 @@ Two Revit hard rules this design satisfies:
 | `RevitMCP.Addin/RevitDispatcher.cs` | Marshals to the UI thread, one slot per request |
 | `RevitMCP.Addin/RequestHandler.cs` | `IExternalEventHandler`; drains the request queue |
 | `RevitMCP.Addin/CommandRouter.cs` | Command → Revit API action (**add tools here**) |
+| `RevitMCP.Addin/CommandRouter.Cad.cs` | CAD-link tools: layer stats, geometry export, walls from wall layers |
+| `RevitMCP.Addin/CommandRouter.CadDoors.cs` | Doors from door swing arcs (hosted on the walls above) |
+| `RevitMCP.Addin/Json.cs` | JSON layer (JavaScriptSerializer on net48, System.Text.Json on net8) |
+| `RevitMCP.Addin/DynamicCompiler.cs` | `execute_code` compiler (CodeDom on net48, Roslyn on net8) |
+| `dev/devcall.ps1` | Dev helper: run a command from a freshly built DLL inside a running Revit 2025+ (no restart) |
 | `mcp_server/server.py` | FastMCP server exposing tools to the MCP client (**add tools here**) |
 
 ## Tools
@@ -92,10 +97,39 @@ Two Revit hard rules this design satisfies:
 | `rename_element` | write | Set an element's Name property (families, types, views, levels, …) |
 | `rename_family_type` | write | Rename a FamilyManager type (family documents only) |
 | `save_family_as` | write | Save the open family to a new .rfa — renames the family itself |
+| `list_cad_links` | read | DWG links/imports with per-layer entity counts |
+| `get_cad_geometry` | read | Raw curves of chosen CAD layers in mm (lines/arcs/polylines), bbox-filtered |
+| `create_walls_from_cad` | write | Wall layer(s) → paired faces → centerlines → `Wall.Create` (dry-run first) |
+| `create_doors_from_cad` | write | Door swing arcs → hosted doors with correct hand/facing, types auto-created by width |
 
 All lengths and coordinates cross the API in **millimeters** (the add-in
 converts to Revit's internal feet); parameter values use the model's **display
 units** — pass 3000 to mean 3000 mm in a metric model.
+
+### CAD-driven modelling (walls + doors from a linked DWG)
+
+Workflow, on a floor plan whose DWG has separate wall / door layers:
+
+1. `list_cad_links` → link id + layer statistics (spot the wall layer, e.g.
+   `A-WALL-S`, and the door layer(s), e.g. `A-WINDOW`, `A-DOOR_FIRE`).
+2. `get_cad_geometry` on a small `bbox_mm` to see how walls/doors are drawn.
+3. `create_walls_from_cad(link_id, layers=["A-WALL-S"], level_id, height_mm,
+   bbox_mm=..., opening_layers=["A-WINDOW","A-DOOR_FIRE"], dry_run=True)` — check
+   the planned centerlines/thicknesses/types, then rerun with `dry_run=False`.
+   Every line/polyline edge becomes a segment; parallel *adjacent* segments a
+   wall-thickness apart are paired (edges of one polyline preferred, so double
+   walls don't become a phantom thin wall); collinear pieces are merged across
+   door/window openings; ends are snapped to the crossing wall's centerline so
+   Revit joins them.
+4. `create_doors_from_cad(link_id, layers=["A-WINDOW"], level_id, bbox_mm=...,
+   dry_run=True)` then `dry_run=False`. Swing arcs (centre = hinge, radius =
+   leaf) → single / double / asymmetric doors hosted on the wall under the
+   hinge; hand and facing are verified against the placed door's own plan
+   swing arc, so family conventions don't matter; missing widths are created
+   by duplicating the nearest type.
+
+Work region by region (`bbox_mm`), always dry-run first, and do it on a
+detached copy while tuning tolerances/type maps.
 
 ## ⚠️ Optional power tool: `execute_code` (disabled by default)
 

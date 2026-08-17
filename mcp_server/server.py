@@ -345,6 +345,119 @@ def place_family_instance(type_id: int, point: list[float],
                  {"type_id": type_id, "point": point, "level_id": level_id})
 
 
+# ---- CAD link driven modelling ------------------------------------------------
+
+@mcp.tool()
+def list_cad_links(include_layers: bool = True, layer_limit: int = 200) -> dict:
+    """List the DWG links/imports (ImportInstance) in the open model. With
+    `include_layers`, each link reports its layers with entity counts
+    (lines/arcs/polylines/other), sorted by size - use it to spot the wall,
+    door and column layers before calling get_cad_geometry or
+    create_walls_from_cad. Returns the link `id` the other CAD tools need."""
+    return _call("list_cad_links", {"include_layers": include_layers,
+                                    "layer_limit": layer_limit})
+
+
+@mcp.tool()
+def get_cad_geometry(link_id: int, layers: list[str] | None = None,
+                     bbox_mm: list[list[float]] | None = None,
+                     limit: int = 500) -> dict:
+    """Read raw curves from a CAD link, in millimeters / model coordinates.
+    `layers` filters by layer name (omit for all); `bbox_mm` =
+    [[xmin, ymin], [xmax, ymax]] keeps only curves touching that rectangle
+    (strongly recommended - whole floors are tens of thousands of entities).
+    Each curve has kind = line {start, end} | arc {center, radius_mm, start,
+    end, mid, sweep_deg} | circle {center, radius_mm} | polyline {points,
+    closed}. Use it to inspect how walls/doors are drawn, or to drive
+    create_wall / place_family_instance by hand on a small area."""
+    return _call("get_cad_geometry", {"link_id": link_id, "layers": layers,
+                                      "bbox_mm": bbox_mm, "limit": limit})
+
+
+@mcp.tool()
+def create_walls_from_cad(link_id: int, layers: list[str], level_id: int,
+                          height_mm: float,
+                          bbox_mm: list[list[float]] | None = None,
+                          dry_run: bool = True,
+                          thicknesses_mm: list[float] | None = None,
+                          tolerance_mm: float = 5.0,
+                          min_length_mm: float = 300.0,
+                          merge_gap_mm: float = 1200.0,
+                          type_map: list[dict] | None = None,
+                          opening_layers: list[str] | None = None,
+                          max_opening_mm: float = 3000.0,
+                          snap_ends: bool = True,
+                          max_walls: int = 1000) -> dict:
+    """Build Revit walls from the wall layer(s) of a CAD link. Algorithm: every
+    line / polyline edge on `layers` becomes a segment; parallel segments whose
+    distance matches a wall thickness (`thicknesses_mm`, default common
+    100..400 mm values, +-`tolerance_mm`) and that overlap by >= `min_length_mm`
+    are paired into a centerline of that thickness; collinear centerlines
+    closer than `merge_gap_mm` (door/window openings) are merged; each result
+    becomes Wall.Create on `level_id`, `height_mm` high, using the basic wall
+    type whose width matches (or `type_map` = [{"thickness_mm", "type_id"}]).
+    ALWAYS start with `dry_run=True` (default) and a small `bbox_mm`: it
+    returns the planned walls (start/end/thickness/type) plus counts of
+    unpaired segments and warnings without touching the model. Then rerun with
+    dry_run=False. Curved walls (arcs) are reported and skipped.
+    Pairing rules: only *adjacent* faces pair (nothing in between), and the two
+    edges of one polyline outline are preferred, so double walls / cavities are
+    not mistaken for a thin wall. Wall ends are extended/trimmed to the
+    centerline of the wall they run into (`snap_ends`) so Revit joins them; pass
+    the door/window layers as `opening_layers` and gaps up to `max_opening_mm`
+    that contain door/window geometry are bridged too (the wall runs through the
+    opening; doors then cut it)."""
+    return _call("create_walls_from_cad", {
+        "link_id": link_id, "layers": layers, "level_id": level_id,
+        "height_mm": height_mm, "bbox_mm": bbox_mm, "dry_run": dry_run,
+        "thicknesses_mm": thicknesses_mm, "tolerance_mm": tolerance_mm,
+        "min_length_mm": min_length_mm, "merge_gap_mm": merge_gap_mm,
+        "type_map": type_map, "opening_layers": opening_layers,
+        "max_opening_mm": max_opening_mm, "snap_ends": snap_ends,
+        "max_walls": max_walls})
+
+
+@mcp.tool()
+def create_doors_from_cad(link_id: int, layers: list[str], level_id: int,
+                          bbox_mm: list[list[float]] | None = None,
+                          dry_run: bool = True,
+                          type_map: list[dict] | None = None,
+                          create_missing_types: bool = True,
+                          single_family: str | None = None,
+                          double_family: str | None = None,
+                          asymmetric_family: str | None = None,
+                          width_tolerance_mm: float = 30.0,
+                          host_tolerance_mm: float = 60.0,
+                          min_single_width_mm: float = 600.0,
+                          skip_existing: bool = True) -> dict:
+    """Place hosted doors from the door swing arcs on CAD layer(s) - run AFTER
+    the walls exist (create_walls_from_cad). Each quarter-circle arc = one leaf:
+    centre = hinge, radius = leaf width; the arc end on the wall is the latch,
+    the other end the open tip, which fixes hinge side and swing side. Two arcs
+    whose latch points meet become a double (equal leaves) or asymmetric door.
+    Host = the straight wall on `level_id` the hinge sits on. Type = `type_map`
+    [{"width_mm", "type_id"}] if given, else the loaded door type of matching
+    width (families are picked by name hints single/double/asym[metric] or the
+    *_family substrings you pass); with `create_missing_types` a missing single
+    /double width is created by duplicating the nearest type and setting Width
+    (asymmetric doors fall back to the nearest type with a warning). Hand and
+    facing are set by comparing the placed door's own plan swing arc with the
+    CAD arc, so family conventions don't matter. Doors within 200 mm of an
+    existing door are skipped (`skip_existing`). Start with dry_run=True: it
+    lists planned doors (kind/width/centre/host/type), unhosted arcs and
+    warnings without touching the model."""
+    return _call("create_doors_from_cad", {
+        "link_id": link_id, "layers": layers, "level_id": level_id,
+        "bbox_mm": bbox_mm, "dry_run": dry_run, "type_map": type_map,
+        "create_missing_types": create_missing_types,
+        "single_family": single_family, "double_family": double_family,
+        "asymmetric_family": asymmetric_family,
+        "width_tolerance_mm": width_tolerance_mm,
+        "host_tolerance_mm": host_tolerance_mm,
+        "min_single_width_mm": min_single_width_mm,
+        "skip_existing": skip_existing})
+
+
 @mcp.tool()
 def rename_element(element_id: int, new_name: str) -> dict:
     """Rename a Revit element by setting its Name *property* (which
