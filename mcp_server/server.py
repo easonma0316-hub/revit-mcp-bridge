@@ -440,7 +440,7 @@ def create_doors_from_cad(link_id: int, layers: list[str], level_id: int,
                           double_family: str | None = None,
                           asymmetric_family: str | None = None,
                           width_tolerance_mm: float = 50.0,
-                          width_step_mm: float = 50.0,
+                          width_step_mm: float = 100.0,
                           ai_tag: str = "_AI",
                           host_tolerance_mm: float = 60.0,
                           min_single_width_mm: float = 600.0,
@@ -455,9 +455,9 @@ def create_doors_from_cad(link_id: int, layers: list[str], level_id: int,
     width (families are picked by name hints single/double/asym[metric] or the
     *_family substrings you pass). Type economy: a type within
     `width_tolerance_mm` is reused; else, with `create_missing_types`, the CAD
-    width is rounded to `width_step_mm` (1170 -> 1150) and ONE type per grid
+    width is rounded to `width_step_mm` (1170 -> 1200) and ONE type per grid
     value is duplicated from the nearest type, named by its convention with the
-    size swapped + `ai_tag` (W900 x H2100 -> W1150 x H2100_AI, Type Comments say
+    size swapped + `ai_tag` (W900 x H2100 -> W1200 x H2100_AI, Type Comments say
     AI-made). Asymmetric doors fall back to the nearest type with a warning.
     Hand and
     facing are set by comparing the placed door's own plan swing arc with the

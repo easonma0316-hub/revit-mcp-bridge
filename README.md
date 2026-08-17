@@ -129,8 +129,8 @@ Workflow, on a floor plan whose DWG has separate wall / door layers:
    leaf) → single / double / asymmetric doors hosted on the wall under the
    hinge; hand and facing are verified against the placed door's own plan
    swing arc, so family conventions don't matter; missing widths are rounded
-   to a 50 mm grid and one type per value is duplicated from the nearest type
-   (`W1150 x H2100_AI`).
+   to a 100 mm grid and one type per value is duplicated from the nearest type
+   (`W1200 x H2100_AI`).
 
 Work region by region (`bbox_mm`), always dry-run first, and do it on a
 detached copy while tuning tolerances/type maps.

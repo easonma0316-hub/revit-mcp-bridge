@@ -146,7 +146,7 @@ namespace RevitMCP.Addin
             double tol = GetDoubleOr(p, "tolerance_mm", 5.0);
             double hostTol = GetDoubleOr(p, "host_tolerance_mm", 60.0);   // hinge may sit on the face or the centreline
             double widthTol = GetDoubleOr(p, "width_tolerance_mm", 50.0);   // reuse an existing type this close
-            double widthStep = GetDoubleOr(p, "width_step_mm", 50.0);       // new types are rounded to this grid
+            double widthStep = GetDoubleOr(p, "width_step_mm", 100.0);      // new types are rounded to this grid
             string aiTag = p.ContainsKey("ai_tag") && p["ai_tag"] != null ? Convert.ToString(p["ai_tag"]) : "_AI";
             double minSweep = GetDoubleOr(p, "min_sweep_deg", 60.0);
             double maxSweep = GetDoubleOr(p, "max_sweep_deg", 120.0);
