@@ -307,6 +307,8 @@ namespace RevitMCP.Addin
             public double Offset;         // centerline offset
             public double T1, T2;         // extent along the direction
             public double Thickness;
+            public bool Centerline;       // from a centerline layer (single line = wall axis), not a face pair
+            public bool Reference;        // an existing model wall used for dedupe/snapping, never created
         }
 
         private static readonly double[] DefaultThicknessesMm =
@@ -356,8 +358,9 @@ namespace RevitMCP.Addin
 
             var li = RequireImport(doc, GetLong(p, "link_id"));
             var layers = GetLayerSet(p);
-            if (layers.Count == 0)
-                throw new McpException(McpException.BadRequest, "Provide the wall layer(s) via 'layer' or 'layers'.");
+            bool hasCenterLayers = p.ContainsKey("centerline_layers") && p["centerline_layers"] is IEnumerable clCheck && !(p["centerline_layers"] is string) && clCheck.Cast<object>().Any();
+            if (layers.Count == 0 && !hasCenterLayers)
+                throw new McpException(McpException.BadRequest, "Provide the wall layer(s) via 'layer' or 'layers' (or 'centerline_layers').");
             var level = doc.GetElement(new ElementId(GetLong(p, "level_id"))) as Level
                         ?? throw new McpException(McpException.NotFound, "'level_id' is not a Level (see list_levels).");
             var heightMm = GetDouble(p, "height_mm");
@@ -459,9 +462,40 @@ namespace RevitMCP.Addin
                 }
                 return false;
             }
-            if (segs.Count == 0)
+            // ---- 1b. centerline layers: single lines ARE wall axes (e.g. shopfront /
+            // area lines) -> pieces of a fixed thickness, no pairing needed.
+            var centerLayers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (p.ContainsKey("centerline_layers") && p["centerline_layers"] is IEnumerable clEnum && !(p["centerline_layers"] is string))
+                foreach (var item in clEnum) if (item != null) centerLayers.Add(Convert.ToString(item));
+            double centerThick = GetDoubleOr(p, "centerline_thickness_mm", 50.0);
+            var centerPieces = new List<WallPiece>();
+            int centerSegs = 0;
+            if (centerLayers.Count > 0)
+            {
+                foreach (var prim in EnumerateCad(doc, li))
+                {
+                    if (!centerLayers.Contains(prim.Layer)) continue;
+                    var cs = new List<Seg>();
+                    switch (prim.Geo)
+                    {
+                        case Line ln: AddSeg(cs, ln.GetEndPoint(0), ln.GetEndPoint(1), bbox, 0); break;
+                        case PolyLine pl:
+                            var pts = pl.GetCoordinates();
+                            for (int i = 0; i + 1 < pts.Count; i++) AddSeg(cs, pts[i], pts[i + 1], bbox, 0);
+                            break;
+                    }
+                    foreach (var sg in cs)
+                    {
+                        if (sg.T2 - sg.T1 < minLen) continue;
+                        centerSegs++;
+                        centerPieces.Add(new WallPiece { Dx = sg.Dx, Dy = sg.Dy, Nx = sg.Nx, Ny = sg.Ny, Offset = sg.Offset, T1 = sg.T1, T2 = sg.T2, Thickness = centerThick, Centerline = true });
+                    }
+                }
+            }
+
+            if (segs.Count == 0 && centerPieces.Count == 0)
                 throw new McpException(McpException.NotFound,
-                    $"No straight wall geometry found on layer(s) {string.Join(", ", layers)}" +
+                    $"No straight wall geometry found on layer(s) {string.Join(", ", layers.Concat(centerLayers))}" +
                     (bbox != null ? " inside bbox_mm." : "."));
 
             // ---- 2. pair parallel segments at a wall thickness apart ----------
@@ -627,6 +661,8 @@ namespace RevitMCP.Addin
             var unpairedSegs = segs.Where(s => !s.Paired && Math.Sqrt((s.X2 - s.X1) * (s.X2 - s.X1) + (s.Y2 - s.Y1) * (s.Y2 - s.Y1)) >= minLen).ToList();
             int unpaired = unpairedSegs.Count;
 
+            pieces.AddRange(centerPieces);
+
             // ---- 3. merge collinear pieces (same direction, thickness, offset) --
             var merged = new List<WallPiece>();
             // Cluster pieces by direction (angle gaps <= angleTol) and put every piece of a
@@ -660,7 +696,7 @@ namespace RevitMCP.Addin
                     w.T1 = Math.Min(t1, t2); w.T2 = Math.Max(t1, t2);
                 }
             }
-            foreach (var grp in pieces.GroupBy(w => new { Dx = Math.Round(w.Dx, 6), Dy = Math.Round(w.Dy, 6), w.Thickness }))
+            foreach (var grp in pieces.GroupBy(w => new { Dx = Math.Round(w.Dx, 6), Dy = Math.Round(w.Dy, 6), w.Thickness, w.Centerline }))
             {
                 var byOffset = grp.OrderBy(w => w.Offset).ThenBy(w => w.T1).ToList();
                 var lane = new List<WallPiece>();
@@ -679,7 +715,7 @@ namespace RevitMCP.Addin
                             cur.T2 = Math.Max(cur.T2, w.T2);
                             continue;
                         }
-                        cur = new WallPiece { Dx = w.Dx, Dy = w.Dy, Nx = w.Nx, Ny = w.Ny, Offset = refOff, T1 = w.T1, T2 = w.T2, Thickness = w.Thickness };
+                        cur = new WallPiece { Dx = w.Dx, Dy = w.Dy, Nx = w.Nx, Ny = w.Ny, Offset = refOff, T1 = w.T1, T2 = w.T2, Thickness = w.Thickness, Centerline = w.Centerline };
                         merged.Add(cur);
                     }
                     lane.Clear();
@@ -693,13 +729,28 @@ namespace RevitMCP.Addin
             }
             merged = merged.Where(w => w.T2 - w.T1 >= minLen).ToList();
 
+            // Existing straight walls on this level act as references: planned pieces
+            // lying on them are duplicates, and ends snap to them like to new walls.
+            var refPieces = new List<WallPiece>();
+            if (GetBoolOr(p, "use_existing_walls", true))
+            {
+                foreach (var w in new FilteredElementCollector(doc).OfClass(typeof(Wall)).Cast<Wall>())
+                {
+                    if (w.LevelId != level.Id || !(w.Location is LocationCurve lc) || !(lc.Curve is Line ln)) continue;
+                    var a = ln.GetEndPoint(0); var b = ln.GetEndPoint(1);
+                    var sg = MakeSeg(FtToMm(a.X), FtToMm(a.Y), FtToMm(b.X), FtToMm(b.Y));
+                    if (sg.T2 - sg.T1 < 1) continue;
+                    refPieces.Add(new WallPiece { Dx = sg.Dx, Dy = sg.Dy, Nx = sg.Nx, Ny = sg.Ny, Offset = sg.Offset, T1 = sg.T1, T2 = sg.T2, Thickness = FtToMm(w.Width), Reference = true });
+                }
+            }
+
             // ---- 3a. drop near-duplicates: a piece running (almost) on top of a longer
             // one - same direction, centerlines closer than half a thickness, >= 80 %
             // covered - is CAD clutter (finish lines pairing with faces), not a wall.
             int dedup = 0;
             {
-                var kept = new List<WallPiece>();
-                foreach (var w in merged.OrderByDescending(w => (w.T2 - w.T1) * 1000 + w.Thickness))
+                var kept = new List<WallPiece>(refPieces);
+                foreach (var w in merged.OrderBy(w => w.Centerline ? 1 : 0).ThenByDescending(w => (w.T2 - w.T1) * 1000 + w.Thickness))
                 {
                     bool dup = false;
                     foreach (var k in kept)
@@ -708,7 +759,9 @@ namespace RevitMCP.Addin
                         // express w's centerline offset in k's frame (frames may be flipped)
                         var wx = w.Nx * w.Offset; var wy = w.Ny * w.Offset;
                         var off = k.Nx * wx + k.Ny * wy;
-                        if (Math.Abs(off - k.Offset) > Math.Max(k.Thickness, w.Thickness) / 2) continue;
+                        // a centerline (area/shopfront) line running along a real wall is that wall
+                        var maxOff = w.Centerline && !k.Centerline ? k.Thickness / 2 + 4 * tol : Math.Max(k.Thickness, w.Thickness) / 2;
+                        if (Math.Abs(off - k.Offset) > maxOff) continue;
                         // param range of w in k's frame
                         var sx = w.Dx * w.T1 + wx; var sy = w.Dy * w.T1 + wy;
                         var ex = w.Dx * w.T2 + wx; var ey = w.Dy * w.T2 + wy;
@@ -719,7 +772,7 @@ namespace RevitMCP.Addin
                     }
                     if (dup) dedup++; else kept.Add(w);
                 }
-                merged = kept;
+                merged = kept.Where(w => !w.Reference).ToList();
             }
 
             // ---- 3a2. close door gaps between collinear pieces of DIFFERENT thickness --
@@ -758,9 +811,10 @@ namespace RevitMCP.Addin
             if (GetBoolOr(p, "snap_ends", true))
             {
                 var updates = new List<Tuple<WallPiece, int, double>>();
+                var snapTargets = merged.Concat(refPieces).ToList();
                 foreach (var w in merged)
                 {
-                    foreach (var o in merged)
+                    foreach (var o in snapTargets)
                     {
                         if (ReferenceEquals(w, o)) continue;
                         var cross = w.Dx * o.Dy - w.Dy * o.Dx;
@@ -895,10 +949,63 @@ namespace RevitMCP.Addin
             var baseTypeId = GetOptLong(p, "base_type_id");
             double typeTol = GetDoubleOr(p, "type_tolerance_mm", 10.0);       // reuse an existing type this close
             int minPerType = GetIntOr(p, "min_walls_per_new_type", 3);        // fewer walls -> probably CAD noise, no new type
-            var thicknessCounts = merged.GroupBy(w => w.Thickness).ToDictionary(g => g.Key, g => g.Count());
+            var thicknessCounts = merged.Where(w => !w.Centerline).GroupBy(w => w.Thickness).ToDictionary(g => g.Key, g => g.Count());
             foreach (var c in curved) thicknessCounts[c.Thickness] = (thicknessCounts.TryGetValue(c.Thickness, out var n0) ? n0 : 0) + 1;
             var createdTypes = new List<string>();
             var typeCache = new Dictionary<double, WallType>();
+
+            // Centerline (placeholder) walls get their own type: fixed thickness, optional
+            // material (e.g. Glass), named by the convention of the nearest basic type
+            // with the function word swapped for the material: SYB_WA_Generic_200mm ->
+            // SYB_WA_Glass_50mm_AI.
+            WallType centerType = null;
+            WallType ResolveCenterType()
+            {
+                if (centerType != null) return centerType;
+                var explicitId = GetOptLong(p, "centerline_type_id");
+                if (explicitId.HasValue) return centerType = doc.GetElement(new ElementId(explicitId.Value)) as WallType
+                    ?? throw new McpException(McpException.NotFound, "'centerline_type_id' is not a wall type.");
+                string material = GetOptString(p, "centerline_material") ?? "Glass";
+                var src = baseTypeId.HasValue ? doc.GetElement(new ElementId(baseTypeId.Value)) as WallType : null;
+                if (src == null) src = basicTypes.Where(t => t.GetCompoundStructure() != null && t.GetCompoundStructure().LayerCount == 1 && !(aiTag != "" && t.Name.EndsWith(aiTag)))
+                                                .OrderBy(t => Math.Abs(FtToMm(t.Width) - centerThick)).FirstOrDefault()
+                                     ?? basicTypes.OrderBy(t => Math.Abs(FtToMm(t.Width) - centerThick)).First();
+                var srcName = src.Name;
+                if (!string.IsNullOrEmpty(aiTag) && srcName.EndsWith(aiTag)) srcName = srcName.Substring(0, srcName.Length - aiTag.Length);
+                var name = DeriveTypeName(srcName, FtToMm(src.Width), centerThick, "");
+                if (!string.IsNullOrEmpty(material))
+                {
+                    var m = System.Text.RegularExpressions.Regex.Match(name, @"([A-Za-z]+)[_\- ]" + Math.Round(centerThick) + @"mm");
+                    if (m.Success) name = name.Substring(0, m.Groups[1].Index) + material + name.Substring(m.Groups[1].Index + m.Groups[1].Length);
+                    else name = material + " " + name;
+                }
+                name += aiTag;
+                var existing = basicTypes.FirstOrDefault(t => t.Name == name);
+                if (existing != null) return centerType = existing;
+                if (dryRun || !createTypes)
+                {
+                    warnings.Add($"centerline walls: type '{name}' ({centerThick} mm, {material}) will be created from '{src.Name}'.");
+                    return centerType = src;
+                }
+                var dup = src.Duplicate(name) as WallType;
+                var cs = dup.GetCompoundStructure();
+                int idx = cs.LayerCount == 1 ? 0 : Math.Max(0, cs.GetFirstCoreLayerIndex());
+                var newLayer = FtToMm(cs.GetLayerWidth(idx)) + (centerThick - FtToMm(cs.GetWidth()));
+                if (newLayer > 0) cs.SetLayerWidth(idx, MmToFt(newLayer));
+                if (!string.IsNullOrEmpty(material))
+                {
+                    var mat = new FilteredElementCollector(doc).OfClass(typeof(Material)).Cast<Material>()
+                        .FirstOrDefault(mm => mm.Name.IndexOf(material, StringComparison.OrdinalIgnoreCase) >= 0 || (material.Equals("Glass", StringComparison.OrdinalIgnoreCase) && mm.Name.Contains("玻璃")));
+                    if (mat != null) cs.SetMaterialId(idx, mat.Id);
+                    else warnings.Add($"No material named like '{material}' in the document; '{name}' created without a material.");
+                }
+                dup.SetCompoundStructure(cs);
+                MarkAiType(dup, "create_walls_from_cad (centerline placeholder)", src.Name);
+                basicTypes.Add(dup);
+                createdTypes.Add($"{name} ({centerThick} mm, {material}, from '{src.Name}')");
+                return centerType = dup;
+            }
+
             WallType ResolveType(double thick)
             {
                 if (typeCache.TryGetValue(thick, out var cached)) return cached;
@@ -988,6 +1095,7 @@ namespace RevitMCP.Addin
                     ["type"] = wt.Name,
                     ["type_id"] = wt.Id.Value
                 };
+                if (w.Centerline) d["centerline"] = true;
                 if (created != null) d["id"] = created.Id.Value;
                 return d;
             }
@@ -1013,7 +1121,7 @@ namespace RevitMCP.Addin
             if (dryRun)
             {
                 int cap = GetIntOr(p, "report_limit", 500);
-                foreach (var w in merged.Take(cap)) walls.Add(Describe(w, ResolveType(w.Thickness), null));
+                foreach (var w in merged.Take(cap)) walls.Add(Describe(w, w.Centerline ? ResolveCenterType() : ResolveType(w.Thickness), null));
                 foreach (var c in curved.Take(cap)) walls.Add(DescribeCurved(c, ResolveType(c.Thickness), null));
             }
             else
@@ -1033,7 +1141,7 @@ namespace RevitMCP.Addin
                     }
                     foreach (var w in merged)
                     {
-                        var wt = ResolveType(w.Thickness);
+                        var wt = w.Centerline ? ResolveCenterType() : ResolveType(w.Thickness);
                         try
                         {
                             var s = new XYZ(MmToFt(w.Dx * w.T1 + w.Nx * w.Offset), MmToFt(w.Dy * w.T1 + w.Ny * w.Offset), z);
@@ -1092,6 +1200,8 @@ namespace RevitMCP.Addin
                             ["length_mm"] = Math.Round(Math.Sqrt((s.X2 - s.X1) * (s.X2 - s.X1) + (s.Y2 - s.Y1) * (s.Y2 - s.Y1)), 1)
                         }).ToList()
                     : null,
+                ["centerline_segments"] = centerSegs,
+                ["centerline_walls_planned"] = merged.Count(w => w.Centerline),
                 ["curved_walls_planned"] = curved.Count,
                 ["unpaired_arcs"] = unpairedArcs,
                 ["types_created"] = createdTypes,

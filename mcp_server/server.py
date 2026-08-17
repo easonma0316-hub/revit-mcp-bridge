@@ -402,6 +402,12 @@ def create_walls_from_cad(link_id: int, layers: list[str], level_id: int,
                           create_missing_types: bool = True,
                           ai_tag: str = "_AI",
                           base_type_id: int | None = None,
+                          centerline_layers: list[str] | None = None,
+                          centerline_thickness_mm: float = 50.0,
+                          centerline_material: str = "Glass",
+                          centerline_type_id: int | None = None,
+                          use_existing_walls: bool = True,
+                          skip_existing: bool = True,
                           max_walls: int = 1000) -> dict:
     """Build Revit walls from the wall layer(s) of a CAD link. Algorithm: every
     line / polyline edge on `layers` becomes a segment; parallel segments whose
@@ -430,7 +436,16 @@ def create_walls_from_cad(link_id: int, layers: list[str], level_id: int,
     source's convention with the size swapped + `ai_tag` (e.g.
     SYB_WA_Generic_200mm -> SYB_WA_Generic_250mm_AI) and Type Comments noting
     it was AI-made. Thicknesses are quantised to `thicknesses_mm`, so CAD noise
-    cannot spawn dozens of types."""
+    cannot spawn dozens of types.
+    Centerline mode: `centerline_layers` (e.g. shop-area / shopfront lines that
+    have no wall thickness) are taken as wall AXES - each line becomes a
+    placeholder wall `centerline_thickness_mm` thick (default 50) of a type
+    named by convention with the material word (SYB_WA_Glass_50mm_AI, structure
+    layer material = `centerline_material`), or `centerline_type_id`. Lines
+    running along real walls (planned or already in the model) are dropped.
+    `layers` may be empty when only centerline walls are wanted. Existing walls
+    on the level are used for dedupe and end snapping (`use_existing_walls`),
+    and walls that already exist are skipped (`skip_existing`)."""
     return _call("create_walls_from_cad", {
         "link_id": link_id, "layers": layers, "level_id": level_id,
         "height_mm": height_mm, "bbox_mm": bbox_mm, "dry_run": dry_run,
@@ -439,7 +454,13 @@ def create_walls_from_cad(link_id: int, layers: list[str], level_id: int,
         "type_map": type_map, "door_layers": door_layers,
         "max_opening_mm": max_opening_mm, "snap_ends": snap_ends,
         "create_missing_types": create_missing_types, "ai_tag": ai_tag,
-        "base_type_id": base_type_id, "max_walls": max_walls},
+        "base_type_id": base_type_id,
+        "centerline_layers": centerline_layers,
+        "centerline_thickness_mm": centerline_thickness_mm,
+        "centerline_material": centerline_material,
+        "centerline_type_id": centerline_type_id,
+        "use_existing_walls": use_existing_walls, "skip_existing": skip_existing,
+        "max_walls": max_walls},
         timeout=None if dry_run else BATCH_TIMEOUT)
 
 
@@ -463,7 +484,9 @@ def create_doors_from_cad(link_id: int, layers: list[str], level_id: int,
     centre = hinge, radius = leaf width; the arc end on the wall is the latch,
     the other end the open tip, which fixes hinge side and swing side. Two arcs
     whose latch points meet become a double (equal leaves) or asymmetric door.
-    Host = the straight wall on `level_id` the hinge sits on. Type = `type_map`
+    Host = the straight wall on `level_id` the hinge sits on (within half the
+    wall thickness + `host_tolerance_mm`; raise it to ~200 for doors drawn on
+    shopfront/area lines that sit a bit off the placeholder wall). Type = `type_map`
     [{"width_mm", "type_id"}] if given, else the loaded door type of matching
     width (families are picked by name hints single/double/asym[metric] or the
     *_family substrings you pass). Type economy: a type within

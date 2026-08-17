@@ -135,6 +135,9 @@ Workflow, on a floor plan whose DWG has separate wall / door layers:
    to a 100 mm grid and one type per value is duplicated from the nearest type
    (`W1200 x H2100_AI`).
 
+   Shopfronts / tenant lines drawn as single lines (no thickness): pass them as
+   `centerline_layers` → 50 mm glass placeholder walls (`SYB_WA_Glass_50mm_AI`),
+   then run doors again with `host_tolerance_mm=200`.
 5. `create_columns_from_cad(link_id, layers=["A-COLUMN"], level_id, height_mm)`
    for the column layer (rectangles + circles).
 6. `snapshot_region(bbox_mm=..., highlight=True, hide_links=True)` → open the
