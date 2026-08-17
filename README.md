@@ -2,8 +2,8 @@
 
 [![build](https://github.com/easonma0316-hub/revit-mcp-bridge/actions/workflows/build.yml/badge.svg)](https://github.com/easonma0316-hub/revit-mcp-bridge/actions/workflows/build.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-![Revit 2024](https://img.shields.io/badge/Revit-2024-0696D7?logo=autodesk&logoColor=white)
-![.NET Framework 4.8](https://img.shields.io/badge/.NET%20Framework-4.8-512BD4)
+![Revit 2024-2026](https://img.shields.io/badge/Revit-2024%20%7C%202025%20%7C%202026-0696D7?logo=autodesk&logoColor=white)
+![.NET Framework 4.8 / .NET 8](https://img.shields.io/badge/.NET-Framework%204.8%20%7C%208-512BD4)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
 
 A Model Context Protocol (MCP) bridge for **Autodesk Revit**, so an MCP client
@@ -21,8 +21,9 @@ the API.
 
 ## Architecture
 
-Revit runs on **.NET Framework 4.8**, where the modern C# MCP SDK can't be hosted
-in-process. So RevitMCP uses the **bridge** pattern:
+Revit hosts add-ins in-process (**.NET Framework 4.8** up to Revit 2024, **.NET 8**
+from Revit 2025), where running the C# MCP SDK alongside the Revit API is
+fragile. So RevitMCP uses the **bridge** pattern:
 
 ```
 MCP client ──stdio──► mcp_server/server.py (CPython, FastMCP)
@@ -119,7 +120,9 @@ Notes:
   understands the `execute_code` command on its localhost-only port.
 - Code runs inside an auto-committed `Transaction`; an exception rolls the
   model back. It also respects `REVIT_MCP_READONLY`.
-- The in-process CodeDom compiler is C# 5 only (no `$"..."` interpolation).
+- Compiler: on Revit 2024 (.NET Framework) the in-box CodeDom compiler is C# 5
+  only (no `$"..."` interpolation); on Revit 2025+ (.NET 8) Roslyn is used, so
+  modern C# works.
 
 ## Configuration (environment variables)
 
@@ -172,37 +175,57 @@ for a full guided walkthrough).
 
 ## Build the add-in (from source)
 
-Requires the .NET Framework 4.8 targeting pack (ships with Visual Studio 2022, or
-install "MSBuild Tools" + the 4.8 targeting pack). The Revit 2024 API comes from
+Requires the .NET 8 SDK (it also builds the .NET Framework 4.8 target; on a
+machine without the 4.8 targeting pack install it via Visual Studio's ".NET
+desktop" workload or the standalone "Developer Pack"). The Revit API comes from
 NuGet (`Nice3point.Revit.Api.*`, which repackages the real Revit assemblies), so
 the project builds even on a machine without Revit installed — no `HintPath`
-editing needed. To target another Revit year, bump both package versions in the
-`.csproj` (e.g. `2025.*`); to use a local Revit install instead, see the comment
-in the `.csproj`.
+editing needed.
+
+The add-in is **multi-targeted**, one build per Revit runtime:
+
+| Revit year | Runtime            | Target framework | Extra files in `bin`              |
+|-----------:|--------------------|------------------|-----------------------------------|
+| 2024       | .NET Framework 4.8 | `net48`          | none (single DLL)                 |
+| 2025, 2026 | .NET 8             | `net8.0-windows` | `Microsoft.CodeAnalysis*.dll` (Roslyn, only used by `execute_code`) |
 
 ```powershell
+# builds 2024 AND 2026
 dotnet build .\RevitMCP.Addin\RevitMCP.Addin.csproj -c Release
+
+# just one year (2025 uses the same .NET 8 code path against the 2025 API)
+dotnet build .\RevitMCP.Addin\RevitMCP.Addin.csproj -c Release -p:RevitVersion=2026
+dotnet build .\RevitMCP.Addin\RevitMCP.Addin.csproj -c Release -p:RevitVersion=2025
 ```
 
-Output: `RevitMCP.Addin\bin\Release\RevitMCP.Addin.dll`. The Revit API DLLs are
-compile-only and are **not** copied to `bin` — Revit loads its own at runtime.
+Output: `RevitMCP.Addin\bin\Release\<year>\` — a complete install set (the DLL,
+its dependencies and `RevitMCP.addin`). The Revit API DLLs are compile-only and
+are **not** copied to `bin` — Revit loads its own at runtime.
 
 ### Continuous integration
 
-`.github/workflows/build.yml` compiles the add-in (on Windows, since net48 is
-Windows-only) and byte-compiles the Python server on every pull request and push
-to `main`. It's a **compile gate**, not a functional test — it can't run tools
+`.github/workflows/build.yml` compiles the add-in for every Revit year (on
+Windows, since both targets are Windows-only) and byte-compiles the Python server
+on every pull request and push to `main`. It's a **compile gate**, not a functional test — it can't run tools
 inside Revit.
 
 ## Install the add-in into Revit
 
-Copy **both** the DLL and the manifest into Revit's add-ins folder (adjust the
-year to match your Revit):
+The easiest way is the installer, which detects installed Revit years and copies
+the matching build (DLL + dependencies + manifest) for each:
 
 ```powershell
-$dst = "$env:APPDATA\Autodesk\Revit\Addins\2024"
-Copy-Item .\RevitMCP.Addin\bin\Release\RevitMCP.Addin.dll $dst
-Copy-Item .\RevitMCP.Addin\RevitMCP.addin $dst
+.\install.ps1                    # every installed Revit we have a build for
+.\install.ps1 -RevitYears 2026   # just one
+```
+
+Or by hand — copy **everything** from the year's build folder into Revit's
+add-ins folder (adjust the year to match your Revit):
+
+```powershell
+$dst = "$env:APPDATA\Autodesk\Revit\Addins\2026"
+Copy-Item .\RevitMCP.Addin\bin\Release\2026\*.dll   $dst
+Copy-Item .\RevitMCP.Addin\bin\Release\2026\*.addin $dst
 ```
 
 Start Revit and open a model. The listener comes up on `http://127.0.0.1:8765/`.

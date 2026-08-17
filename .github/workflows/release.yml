@@ -13,7 +13,7 @@ permissions:
 jobs:
   release:
     name: Build add-in and publish release
-    runs-on: windows-latest # net48 is Windows-only
+    runs-on: windows-latest # net48 / net8.0-windows are Windows-only
     steps:
       - uses: actions/checkout@v4
 
@@ -28,10 +28,17 @@ jobs:
       - name: Package add-in + installer
         shell: pwsh
         run: |
+          # Layout: RevitMCP-addin/<year>/{RevitMCP.Addin.dll, deps, RevitMCP.addin}
+          #         RevitMCP-addin/install.ps1
           $stage = "dist/RevitMCP-addin"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
-          Copy-Item RevitMCP.Addin/bin/Release/RevitMCP.Addin.dll $stage
-          Copy-Item RevitMCP.Addin/RevitMCP.addin $stage
+          foreach ($y in 2024, 2026) {
+            $src = "RevitMCP.Addin/bin/Release/$y"
+            if (-not (Test-Path "$src/RevitMCP.Addin.dll")) { throw "Missing build for Revit $y" }
+            New-Item -ItemType Directory -Force -Path "$stage/$y" | Out-Null
+            Copy-Item "$src/*.dll"  "$stage/$y"
+            Copy-Item RevitMCP.Addin/RevitMCP.addin "$stage/$y"
+          }
           Copy-Item install.ps1 $stage
           Compress-Archive -Path "$stage/*" -DestinationPath "dist/RevitMCP-addin.zip" -Force
 

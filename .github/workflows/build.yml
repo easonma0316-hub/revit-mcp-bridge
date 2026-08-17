@@ -2,7 +2,8 @@
 # a Revit install (the Revit API comes from NuGet). This is a compile gate, not a
 # functional test - it cannot run tools inside Revit.
 #
-# net48 is Windows-only, so the C# job must run on windows-latest. On a PRIVATE
+# The add-in multi-targets net48 (Revit 2024) and net8.0-windows (Revit 2025/2026);
+# both are Windows-only, so the C# job must run on windows-latest. On a PRIVATE
 # repo, Windows minutes count 2x against the Actions quota, so this only runs on
 # pull requests and pushes to main (not on every WIP push). Broaden `on:` if you
 # want per-push checks on feature branches.
@@ -16,7 +17,7 @@ on:
 
 jobs:
   build-addin:
-    name: Build Revit add-in (net48)
+    name: Build Revit add-in (2024 net48 + 2026 net8)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -26,8 +27,16 @@ jobs:
         with:
           dotnet-version: "8.0.x"
 
-      - name: Build add-in (Release)
+      - name: Build add-in (Release, all Revit years)
         run: dotnet build RevitMCP.Addin/RevitMCP.Addin.csproj -c Release
+
+      - name: Check outputs
+        shell: pwsh
+        run: |
+          foreach ($y in 2024, 2026) {
+            $dll = "RevitMCP.Addin/bin/Release/$y/RevitMCP.Addin.dll"
+            if (-not (Test-Path $dll)) { throw "Missing $dll" }
+          }
 
   check-python:
     name: Check Python MCP server

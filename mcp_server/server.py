@@ -384,7 +384,9 @@ if ENABLE_CODE:
         Rules:
         - Already wrapped in a committed Transaction — do NOT open your own
           (SubTransactions are fine). An exception rolls everything back.
-        - C# 5 syntax only (no `$"..."` interpolation, no `?.`).
+        - Revit 2024 (.NET Framework, CodeDom): C# 5 syntax only (no `$"..."`
+          interpolation, no `?.`). Revit 2025+ (.NET 8, Roslyn): modern C#.
+          When unsure which Revit is running (see `ping`), stick to C# 5.
         - Usings available: System, System.Collections.Generic, System.Linq,
           Autodesk.Revit.DB(+.Architecture/.Structure), Autodesk.Revit.UI.
         - Return values are JSON-ified (Element -> summary, ElementId -> id,

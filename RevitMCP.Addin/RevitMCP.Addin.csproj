@@ -1,49 +1,95 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
+  <!--
+    Multi-version build.
+
+      Revit year   Runtime               TargetFramework
+      2024         .NET Framework 4.8    net48
+      2025 / 2026  .NET 8                net8.0-windows
+
+    `dotnet build -c Release`                     -> builds 2024 AND 2026 (both TFMs)
+    `dotnet build -c Release -p:RevitVersion=2026` -> builds just that year
+    `dotnet build -c Release -p:RevitVersion=2025` -> net8 build against the 2025 API
+
+    Output: bin\<Configuration>\<RevitVersion>\RevitMCP.Addin.dll
+  -->
   <PropertyGroup>
-    <TargetFramework>net48</TargetFramework>
+    <!-- No RevitVersion given: build every supported runtime. -->
+    <TargetFrameworks Condition="'$(RevitVersion)' == ''">net48;net8.0-windows</TargetFrameworks>
+    <!-- Explicit RevitVersion: pick the runtime that year needs. -->
+    <TargetFramework Condition="'$(RevitVersion)' != '' and $(RevitVersion) &lt; 2025">net48</TargetFramework>
+    <TargetFramework Condition="'$(RevitVersion)' != '' and $(RevitVersion) &gt;= 2025">net8.0-windows</TargetFramework>
+  </PropertyGroup>
+
+  <!-- Inside a multi-target inner build RevitVersion is still empty; derive it
+       from the TFM (newest year each runtime supports). -->
+  <PropertyGroup Condition="'$(RevitVersion)' == ''">
+    <RevitVersion Condition="'$(TargetFramework)' == 'net48'">2024</RevitVersion>
+    <RevitVersion Condition="'$(TargetFramework)' == 'net8.0-windows'">2026</RevitVersion>
+  </PropertyGroup>
+
+  <PropertyGroup>
     <LangVersion>latest</LangVersion>
     <Platform>x64</Platform>
     <PlatformTarget>x64</PlatformTarget>
     <AssemblyName>RevitMCP.Addin</AssemblyName>
     <RootNamespace>RevitMCP.Addin</RootNamespace>
     <Configuration Condition="'$(Configuration)' == ''">Debug</Configuration>
-    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
-    <!-- Revit loads the DLL itself; we don't need a deps file or extra copies. -->
     <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+    <!-- One folder per Revit year, no TFM suffix (the year already implies it). -->
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <OutputPath>bin\$(Configuration)\$(RevitVersion)\</OutputPath>
+    <IntermediateOutputPath>obj\$(Configuration)\$(RevitVersion)\</IntermediateOutputPath>
+    <!-- Revit loads the DLL itself; no deps.json / runtimeconfig needed. -->
+    <GenerateDependencyFile>false</GenerateDependencyFile>
+    <GenerateRuntimeConfigurationFiles>false</GenerateRuntimeConfigurationFiles>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <DefineConstants>$(DefineConstants);REVIT$(RevitVersion)</DefineConstants>
   </PropertyGroup>
 
-  <!-- Framework assembly for the built-in JSON (de)serializer (no NuGet, avoids
-       Newtonsoft version clashes with the copy Revit already loads). -->
-  <ItemGroup>
+  <!-- .NET Framework (Revit 2024): built-in JSON via System.Web.Extensions
+       (JavaScriptSerializer) and C# scripting via CodeDom - both ship with the
+       framework, so the add-in stays a single DLL. -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'net48'">
     <Reference Include="System.Web.Extensions" />
   </ItemGroup>
 
-  <!-- Revit 2024 API via NuGet (Nice3point repackages the real Revit assemblies).
-       This lets the project build anywhere - including CI, which has no Revit
-       install - while staying identical to the official DLLs.
+  <!-- .NET 8 (Revit 2025/2026): JSON via System.Text.Json (in the BCL). CodeDom
+       can't compile on .NET Core, so execute_code uses Roslyn instead. Pinned to
+       4.12 because its System.Collections.Immutable / System.Reflection.Metadata
+       deps are the 8.0 versions already inside the .NET 8 runtime Revit hosts,
+       so only the two Microsoft.CodeAnalysis*.dll files land in bin. -->
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net8.0-windows'">
+    <UseWPF>true</UseWPF>
+    <!-- Copy NuGet runtime assets (the Roslyn DLLs) into bin so they ship with the add-in. -->
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(TargetFramework)' == 'net8.0-windows'">
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.12.0" />
+  </ItemGroup>
+
+  <!-- Revit API via NuGet (Nice3point repackages the official assemblies), so the
+       project builds anywhere - including CI, which has no Revit install.
 
        ExcludeAssets="runtime" + PrivateAssets="all" = compile-only: the DLLs are
-       NOT copied into bin (Revit loads its own copy at runtime), equivalent to the
-       old <Private>false</Private>.
+       NOT copied into bin (Revit loads its own copy at runtime).
 
-       Pinned to 2024.* so the API surface matches Revit 2024. To target another
-       year, change both versions (e.g. 2025.*).
-
-       To go back to a local install instead, delete these two PackageReferences
-       and restore the HintPath references:
-         <Reference Include="RevitAPI">
-           <HintPath>C:\Program Files\Autodesk\Revit 2024\RevitAPI.dll</HintPath>
-           <Private>false</Private>
-         </Reference>
-         <Reference Include="RevitAPIUI">
-           <HintPath>C:\Program Files\Autodesk\Revit 2024\RevitAPIUI.dll</HintPath>
-           <Private>false</Private>
-         </Reference>
-  -->
+       Package versions are pinned per year (reproducible restores); an unlisted
+       year falls back to the newest package for that year. -->
+  <PropertyGroup>
+    <RevitApiVersion Condition="'$(RevitVersion)' == '2024'">2024.0.0</RevitApiVersion>
+    <RevitApiVersion Condition="'$(RevitVersion)' == '2025'">2025.4.60</RevitApiVersion>
+    <RevitApiVersion Condition="'$(RevitVersion)' == '2026'">2026.4.10</RevitApiVersion>
+    <RevitApiVersion Condition="'$(RevitApiVersion)' == ''">$(RevitVersion).*</RevitApiVersion>
+  </PropertyGroup>
+  <!-- Ship the manifest next to the DLL so bin\Release\<year>\ is a complete install set. -->
   <ItemGroup>
-    <PackageReference Include="Nice3point.Revit.Api.RevitAPI" Version="2024.0.0" ExcludeAssets="runtime" PrivateAssets="all" />
-    <PackageReference Include="Nice3point.Revit.Api.RevitAPIUI" Version="2024.0.0" ExcludeAssets="runtime" PrivateAssets="all" />
+    <None Include="RevitMCP.addin" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Nice3point.Revit.Api.RevitAPI" Version="$(RevitApiVersion)" ExcludeAssets="runtime" PrivateAssets="all" />
+    <PackageReference Include="Nice3point.Revit.Api.RevitAPIUI" Version="$(RevitApiVersion)" ExcludeAssets="runtime" PrivateAssets="all" />
   </ItemGroup>
 
 </Project>

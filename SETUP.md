@@ -1,7 +1,7 @@
 # RevitMCP — Setup & Test Playbook
 
 This is a step-by-step runbook for installing and testing RevitMCP on a Windows
-machine with Revit 2024. It is written so you can hand it to an AI coding agent
+machine with Revit 2024, 2025 or 2026. It is written so you can hand it to an AI coding agent
 (e.g. Claude Code in your terminal) and say:
 
 > "Follow SETUP.md step by step. Run one phase at a time, verify the checkpoint
@@ -11,8 +11,9 @@ machine with Revit 2024. It is written so you can hand it to an AI coding agent
 before you build the next on top of it. If something breaks, you know exactly
 which layer to look at.
 
-> ⚠️ Must run on a **Windows** machine with **Revit 2024** installed. The Revit
-> add-in cannot run on Linux/macOS.
+> ⚠️ Must run on a **Windows** machine with **Revit 2024, 2025 or 2026** installed.
+> The Revit add-in cannot run on Linux/macOS. The examples below use 2026 —
+> substitute your year.
 
 ---
 
@@ -21,9 +22,9 @@ which layer to look at.
 Run these and confirm each is present:
 
 ```powershell
-dotnet --version        # need a .NET SDK (includes the tooling to build net48)
+dotnet --version        # need the .NET 8 SDK (builds both net48 and net8.0-windows)
 python --version        # need Python 3.10+
-Test-Path "C:\Program Files\Autodesk\Revit 2024\Revit.exe"   # should be True
+Test-Path "C:\Program Files\Autodesk\Revit 2026\Revit.exe"   # should be True (or 2024 / 2025)
 ```
 
 - ✅ **Checkpoint:** `dotnet` prints a version, `python` prints 3.10+, and the
@@ -42,27 +43,31 @@ Test-Path "C:\Program Files\Autodesk\Revit 2024\Revit.exe"   # should be True
 From the repository root:
 
 ```powershell
-# 1. Build the add-in
+# 1. Build the add-in (produces bin\Release\2024 and bin\Release\2026;
+#    add -p:RevitVersion=2025 for Revit 2025)
 dotnet build .\RevitMCP.Addin\RevitMCP.Addin.csproj -c Release
 
-# 2. Copy the DLL + manifest into Revit's add-ins folder
-$dst = "$env:APPDATA\Autodesk\Revit\Addins\2024"
+# 2. Copy the build for your Revit year into Revit's add-ins folder
+#    (or simply run .\install.ps1, which does this for every installed Revit)
+$year = 2026
+$dst = "$env:APPDATA\Autodesk\Revit\Addins\$year"
 New-Item -ItemType Directory -Force -Path $dst | Out-Null
-Copy-Item .\RevitMCP.Addin\bin\Release\RevitMCP.Addin.dll $dst -Force
-Copy-Item .\RevitMCP.Addin\RevitMCP.addin $dst -Force
+Copy-Item .\RevitMCP.Addin\bin\Release\$year\*.dll   $dst -Force
+Copy-Item .\RevitMCP.Addin\bin\Release\$year\*.addin $dst -Force
 
-# 3. Confirm both files landed
+# 3. Confirm the files landed
 Get-ChildItem $dst\RevitMCP.*
 ```
 
 - ✅ **Checkpoint:** the build reports **Build succeeded**, and the last command
-  lists both `RevitMCP.Addin.dll` and `RevitMCP.addin`.
+  lists both `RevitMCP.Addin.dll` and `RevitMCP.addin` (for 2025/2026 the folder
+  also holds two `Microsoft.CodeAnalysis*.dll` files).
 - ❌ **If it fails:**
   - Build error → read the first error line. A NuGet restore issue means no
     internet; a Revit-API error means the package version doesn't match your
     Revit (see `.csproj` comments).
   - Copy error → the Addins folder path is wrong for your Revit version; adjust
-    the `2024` in the path.
+    `$year`.
 
 Now **start Revit and open any model**. On first launch Revit shows a security
 prompt for the unsigned add-in — choose **Always Load**.

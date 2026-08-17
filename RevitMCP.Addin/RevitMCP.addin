@@ -7,6 +7,6 @@
     <FullClassName>RevitMCP.Addin.RevitMcpApp</FullClassName>
     <AddInId>4b6f3c2a-9d1e-4a77-bf2c-7e2d9a1c4f10</AddInId>
     <VendorId>EASON</VendorId>
-    <VendorDescription>RevitMCP - Model Context Protocol bridge for Revit 2024</VendorDescription>
+    <VendorDescription>RevitMCP - Model Context Protocol bridge for Revit (2024 / 2025 / 2026)</VendorDescription>
   </AddIn>
 </RevitAddIns>

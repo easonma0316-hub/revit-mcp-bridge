@@ -958,26 +958,8 @@ public static class McpDynamicCode
             var source = prefix + code + "\n    }\n}\n";
             var prefixLines = prefix.Count(c => c == '\n');
 
-            System.CodeDom.Compiler.CompilerResults results;
-            using (var provider = new Microsoft.CSharp.CSharpCodeProvider())
-            {
-                var pars = new System.CodeDom.Compiler.CompilerParameters { GenerateInMemory = true };
-                pars.ReferencedAssemblies.Add("System.dll");
-                pars.ReferencedAssemblies.Add("System.Core.dll");
-                pars.ReferencedAssemblies.Add(typeof(Document).Assembly.Location);      // RevitAPI
-                pars.ReferencedAssemblies.Add(typeof(UIApplication).Assembly.Location); // RevitAPIUI
-                results = provider.CompileAssemblyFromSource(pars, source);
-            }
-            if (results.Errors.HasErrors)
-            {
-                var errors = results.Errors.Cast<System.CodeDom.Compiler.CompilerError>()
-                    .Where(e => !e.IsWarning)
-                    .Select(e => $"line {e.Line - prefixLines}: {e.ErrorText}");
-                throw new McpException(McpException.BadRequest,
-                    "C# compilation failed:\n" + string.Join("\n", errors));
-            }
-
-            var run = results.CompiledAssembly.GetType("McpDynamicCode").GetMethod("Run");
+            var assembly = DynamicCompiler.Compile(source, prefixLines);
+            var run = assembly.GetType("McpDynamicCode").GetMethod("Run");
             object value;
             using (var t = new Transaction(doc, "MCP: execute code"))
             {
@@ -1271,7 +1253,7 @@ public static class McpDynamicCode
 
         /// <summary>
         /// Reads element ids from either "ids" (array) or "id" (single). Accepts the
-        /// various shapes JavaScriptSerializer produces for a JSON array.
+        /// various shapes the JSON layer produces for a JSON array.
         /// </summary>
         private static List<long> GetIdList(Dictionary<string, object> p, bool allowSingle)
         {

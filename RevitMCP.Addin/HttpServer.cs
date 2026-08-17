@@ -4,7 +4,6 @@ using System.IO;
 using System.Net;
 using System.Text;
 using System.Threading;
-using System.Web.Script.Serialization;
 
 namespace RevitMCP.Addin
 {
@@ -22,7 +21,6 @@ namespace RevitMCP.Addin
     {
         private readonly HttpListener _listener = new HttpListener();
         private readonly RevitDispatcher _dispatcher;
-        private readonly JavaScriptSerializer _json = new JavaScriptSerializer();
         private Thread _thread;
         private volatile bool _running;
 
@@ -32,7 +30,6 @@ namespace RevitMCP.Addin
         public HttpServer(RevitDispatcher dispatcher)
         {
             _dispatcher = dispatcher;
-            _json.MaxJsonLength = 64 * 1024 * 1024; // large models can produce big element lists
         }
 
         /// <summary>
@@ -110,8 +107,7 @@ namespace RevitMCP.Addin
                 Dictionary<string, object> request;
                 try
                 {
-                    request = _json.Deserialize<Dictionary<string, object>>(body)
-                              ?? new Dictionary<string, object>();
+                    request = Json.DeserializeObject(body) ?? new Dictionary<string, object>();
                 }
                 catch (Exception ex)
                 {
@@ -170,7 +166,7 @@ namespace RevitMCP.Addin
 
         private void WriteJson(HttpListenerContext ctx, int status, Dictionary<string, object> payload)
         {
-            var buffer = Encoding.UTF8.GetBytes(_json.Serialize(payload));
+            var buffer = Encoding.UTF8.GetBytes(Json.Serialize(payload));
             try
             {
                 ctx.Response.StatusCode = status;
