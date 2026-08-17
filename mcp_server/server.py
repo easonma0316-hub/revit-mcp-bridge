@@ -382,11 +382,14 @@ def create_walls_from_cad(link_id: int, layers: list[str], level_id: int,
                           thicknesses_mm: list[float] | None = None,
                           tolerance_mm: float = 5.0,
                           min_length_mm: float = 300.0,
-                          merge_gap_mm: float = 1200.0,
+                          merge_gap_mm: float = 300.0,
                           type_map: list[dict] | None = None,
-                          opening_layers: list[str] | None = None,
+                          door_layers: list[str] | None = None,
                           max_opening_mm: float = 3000.0,
                           snap_ends: bool = True,
+                          create_missing_types: bool = True,
+                          ai_tag: str = "_AI",
+                          base_type_id: int | None = None,
                           max_walls: int = 1000) -> dict:
     """Build Revit walls from the wall layer(s) of a CAD link. Algorithm: every
     line / polyline edge on `layers` becomes a segment; parallel segments whose
@@ -399,22 +402,32 @@ def create_walls_from_cad(link_id: int, layers: list[str], level_id: int,
     ALWAYS start with `dry_run=True` (default) and a small `bbox_mm`: it
     returns the planned walls (start/end/thickness/type) plus counts of
     unpaired segments and warnings without touching the model. Then rerun with
-    dry_run=False. Curved walls (arcs) are reported and skipped.
+    dry_run=False. Curved walls: concentric arcs a thickness apart become arc
+    walls (Wall.Create with an Arc).
     Pairing rules: only *adjacent* faces pair (nothing in between), and the two
     edges of one polyline outline are preferred, so double walls / cavities are
     not mistaken for a thin wall. Wall ends are extended/trimmed to the
-    centerline of the wall they run into (`snap_ends`) so Revit joins them; pass
-    the door/window layers as `opening_layers` and gaps up to `max_opening_mm`
-    that contain door/window geometry are bridged too (the wall runs through the
-    opening; doors then cut it)."""
+    centerline of the wall they run into (`snap_ends`) so Revit joins them.
+    Openings: pass the layer(s) holding door swing arcs as `door_layers`; a gap
+    (up to `max_opening_mm`) that contains a swing arc is bridged - the wall
+    runs through and the door cuts it later. Gaps holding only lines/polylines
+    (windows) or nothing are LEFT OPEN in the wall, as are gaps > merge_gap_mm.
+    Types: an existing basic wall type within `tolerance_mm` of the thickness
+    is reused; otherwise (create_missing_types) the nearest type (or
+    `base_type_id`) is duplicated with its core layer resized, named after the
+    source's convention with the size swapped + `ai_tag` (e.g.
+    SYB_WA_Generic_200mm -> SYB_WA_Generic_250mm_AI) and Type Comments noting
+    it was AI-made. Thicknesses are quantised to `thicknesses_mm`, so CAD noise
+    cannot spawn dozens of types."""
     return _call("create_walls_from_cad", {
         "link_id": link_id, "layers": layers, "level_id": level_id,
         "height_mm": height_mm, "bbox_mm": bbox_mm, "dry_run": dry_run,
         "thicknesses_mm": thicknesses_mm, "tolerance_mm": tolerance_mm,
         "min_length_mm": min_length_mm, "merge_gap_mm": merge_gap_mm,
-        "type_map": type_map, "opening_layers": opening_layers,
+        "type_map": type_map, "door_layers": door_layers,
         "max_opening_mm": max_opening_mm, "snap_ends": snap_ends,
-        "max_walls": max_walls})
+        "create_missing_types": create_missing_types, "ai_tag": ai_tag,
+        "base_type_id": base_type_id, "max_walls": max_walls})
 
 
 @mcp.tool()
@@ -426,7 +439,9 @@ def create_doors_from_cad(link_id: int, layers: list[str], level_id: int,
                           single_family: str | None = None,
                           double_family: str | None = None,
                           asymmetric_family: str | None = None,
-                          width_tolerance_mm: float = 30.0,
+                          width_tolerance_mm: float = 50.0,
+                          width_step_mm: float = 50.0,
+                          ai_tag: str = "_AI",
                           host_tolerance_mm: float = 60.0,
                           min_single_width_mm: float = 600.0,
                           skip_existing: bool = True) -> dict:
@@ -438,9 +453,13 @@ def create_doors_from_cad(link_id: int, layers: list[str], level_id: int,
     Host = the straight wall on `level_id` the hinge sits on. Type = `type_map`
     [{"width_mm", "type_id"}] if given, else the loaded door type of matching
     width (families are picked by name hints single/double/asym[metric] or the
-    *_family substrings you pass); with `create_missing_types` a missing single
-    /double width is created by duplicating the nearest type and setting Width
-    (asymmetric doors fall back to the nearest type with a warning). Hand and
+    *_family substrings you pass). Type economy: a type within
+    `width_tolerance_mm` is reused; else, with `create_missing_types`, the CAD
+    width is rounded to `width_step_mm` (1170 -> 1150) and ONE type per grid
+    value is duplicated from the nearest type, named by its convention with the
+    size swapped + `ai_tag` (W900 x H2100 -> W1150 x H2100_AI, Type Comments say
+    AI-made). Asymmetric doors fall back to the nearest type with a warning.
+    Hand and
     facing are set by comparing the placed door's own plan swing arc with the
     CAD arc, so family conventions don't matter. Doors within 200 mm of an
     existing door are skipped (`skip_existing`). Start with dry_run=True: it
@@ -453,6 +472,7 @@ def create_doors_from_cad(link_id: int, layers: list[str], level_id: int,
         "single_family": single_family, "double_family": double_family,
         "asymmetric_family": asymmetric_family,
         "width_tolerance_mm": width_tolerance_mm,
+        "width_step_mm": width_step_mm, "ai_tag": ai_tag,
         "host_tolerance_mm": host_tolerance_mm,
         "min_single_width_mm": min_single_width_mm,
         "skip_existing": skip_existing})

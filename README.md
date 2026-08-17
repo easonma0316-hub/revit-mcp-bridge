@@ -114,19 +114,23 @@ Workflow, on a floor plan whose DWG has separate wall / door layers:
    `A-WALL-S`, and the door layer(s), e.g. `A-WINDOW`, `A-DOOR_FIRE`).
 2. `get_cad_geometry` on a small `bbox_mm` to see how walls/doors are drawn.
 3. `create_walls_from_cad(link_id, layers=["A-WALL-S"], level_id, height_mm,
-   bbox_mm=..., opening_layers=["A-WINDOW","A-DOOR_FIRE"], dry_run=True)` — check
+   bbox_mm=..., door_layers=["A-WINDOW","A-DOOR_FIRE"], dry_run=True)` — check
    the planned centerlines/thicknesses/types, then rerun with `dry_run=False`.
    Every line/polyline edge becomes a segment; parallel *adjacent* segments a
    wall-thickness apart are paired (edges of one polyline preferred, so double
-   walls don't become a phantom thin wall); collinear pieces are merged across
-   door/window openings; ends are snapped to the crossing wall's centerline so
-   Revit joins them.
+   walls don't become a phantom thin wall); concentric arcs become curved
+   walls; collinear pieces are bridged across *door* openings (a swing arc in
+   the gap) while window gaps stay open; ends are snapped to the crossing
+   wall's centerline so Revit joins them. Missing thicknesses get one type each,
+   duplicated from the nearest type and named by its convention
+   (`SYB_WA_Generic_250mm_AI`, Type Comments = AI provenance).
 4. `create_doors_from_cad(link_id, layers=["A-WINDOW"], level_id, bbox_mm=...,
    dry_run=True)` then `dry_run=False`. Swing arcs (centre = hinge, radius =
    leaf) → single / double / asymmetric doors hosted on the wall under the
    hinge; hand and facing are verified against the placed door's own plan
-   swing arc, so family conventions don't matter; missing widths are created
-   by duplicating the nearest type.
+   swing arc, so family conventions don't matter; missing widths are rounded
+   to a 50 mm grid and one type per value is duplicated from the nearest type
+   (`W1150 x H2100_AI`).
 
 Work region by region (`bbox_mm`), always dry-run first, and do it on a
 detached copy while tuning tolerances/type maps.

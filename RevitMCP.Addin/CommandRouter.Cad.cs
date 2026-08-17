@@ -366,12 +366,13 @@ namespace RevitMCP.Addin
             double tol = GetDoubleOr(p, "tolerance_mm", 5.0);
             double angleTol = GetDoubleOr(p, "angle_tolerance_deg", 0.5);
             double minLen = GetDoubleOr(p, "min_length_mm", 300.0);
-            double mergeGap = GetDoubleOr(p, "merge_gap_mm", 1200.0);
+            double mergeGap = GetDoubleOr(p, "merge_gap_mm", 300.0);   // small: windows must stay open
             int maxWalls = GetIntOr(p, "max_walls", 1000);
             var warnings = new List<string>();
 
             // ---- 1. collect straight segments from the wall layers -----------
             var segs = new List<Seg>();
+            var cadArcs = new List<CadArc>();
             int arcCount = 0, otherCount = 0, polylineCount = 0, lineCount = 0, source = 0;
             foreach (var prim in EnumerateCad(doc, li))
             {
@@ -388,43 +389,41 @@ namespace RevitMCP.Addin
                         var pts = pl.GetCoordinates();
                         for (int i = 0; i + 1 < pts.Count; i++) AddSeg(segs, pts[i], pts[i + 1], bbox, source);
                         break;
-                    case Arc _:
+                    case Arc arc when arc.IsBound:
                         arcCount++;
+                        AddArc(cadArcs, arc, bbox, source);
                         break;
                     default:
                         otherCount++;
                         break;
                 }
             }
-            if (arcCount > 0) warnings.Add($"{arcCount} arc(s) on the wall layer(s) were skipped (curved walls are not supported yet).");
 
-            // Door/window layers: their geometry is evidence that a gap in a wall is an
-            // opening (to be cut by a door/window later), so the wall may run through it.
-            var openingLayers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            if (p.ContainsKey("opening_layers") && p["opening_layers"] is IEnumerable ol && !(p["opening_layers"] is string))
-                foreach (var item in ol) if (item != null) openingLayers.Add(Convert.ToString(item));
+            // Door layers: a door SWING ARC inside a gap is evidence that the gap is a
+            // door opening, so the wall may run through it (the door cuts it later).
+            // Lines/polylines on those layers (windows, leaf rectangles) are NOT
+            // evidence: window openings stay as gaps in the wall.
+            var doorLayers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var key in new[] { "door_layers", "opening_layers" })
+                if (p.ContainsKey(key) && p[key] is IEnumerable ol && !(p[key] is string))
+                    foreach (var item in ol) if (item != null) doorLayers.Add(Convert.ToString(item));
             double maxOpening = GetDoubleOr(p, "max_opening_mm", 3000.0);
-            var openingPts = new List<double[]>(); // [x, y] in mm
-            if (openingLayers.Count > 0)
+            var openingPts = new List<double[]>(); // [x, y] in mm - points of door swing arcs
+            if (doorLayers.Count > 0)
             {
                 foreach (var prim in EnumerateCad(doc, li))
                 {
-                    if (!openingLayers.Contains(prim.Layer)) continue;
-                    switch (prim.Geo)
-                    {
-                        case PolyLine pl:
-                            foreach (var pt in pl.GetCoordinates()) openingPts.Add(new[] { FtToMm(pt.X), FtToMm(pt.Y) });
-                            break;
-                        case Curve c when c.IsBound:
-                            openingPts.Add(new[] { FtToMm(c.GetEndPoint(0).X), FtToMm(c.GetEndPoint(0).Y) });
-                            openingPts.Add(new[] { FtToMm(c.GetEndPoint(1).X), FtToMm(c.GetEndPoint(1).Y) });
-                            var m = c.Evaluate(0.5, true);
-                            openingPts.Add(new[] { FtToMm(m.X), FtToMm(m.Y) });
-                            break;
-                    }
+                    if (!doorLayers.Contains(prim.Layer) || !(prim.Geo is Arc darc) || !darc.IsBound) continue;
+                    var sweep = (darc.GetEndParameter(1) - darc.GetEndParameter(0)) * 180.0 / Math.PI;
+                    if (sweep < 45 || sweep > 200) continue; // door swings are ~90 (or 180) degrees
+                    var r = FtToMm(darc.Radius);
+                    if (r < 250 || r > 3000) continue;
+                    openingPts.Add(new[] { FtToMm(darc.Center.X), FtToMm(darc.Center.Y) });
+                    openingPts.Add(new[] { FtToMm(darc.GetEndPoint(0).X), FtToMm(darc.GetEndPoint(0).Y) });
+                    openingPts.Add(new[] { FtToMm(darc.GetEndPoint(1).X), FtToMm(darc.GetEndPoint(1).Y) });
                 }
             }
-            // Is there opening geometry inside the corridor of wall w between params ta..tb?
+            // Is there door-swing geometry inside the corridor of wall w between params ta..tb?
             bool OpeningBetween(WallPiece w, double ta, double tb)
             {
                 if (openingPts.Count == 0) return false;
@@ -536,7 +535,8 @@ namespace RevitMCP.Addin
                     });
                 }
             }
-            int unpaired = segs.Count(s => !s.Paired && Math.Sqrt((s.X2 - s.X1) * (s.X2 - s.X1) + (s.Y2 - s.Y1) * (s.Y2 - s.Y1)) >= minLen);
+            var unpairedSegs = segs.Where(s => !s.Paired && Math.Sqrt((s.X2 - s.X1) * (s.X2 - s.X1) + (s.Y2 - s.Y1) * (s.Y2 - s.Y1)) >= minLen).ToList();
+            int unpaired = unpairedSegs.Count;
 
             // ---- 3. merge collinear pieces (same direction, thickness, offset) --
             var merged = new List<WallPiece>();
@@ -610,9 +610,51 @@ namespace RevitMCP.Addin
                 merged = merged.Where(w => w.T2 - w.T1 >= minLen / 2).ToList();
             }
 
-            if (!dryRun && merged.Count > maxWalls)
+            // ---- 3c. curved walls: concentric arcs a thickness apart --------------
+            var curved = new List<CurvedPiece>();
+            int unpairedArcs = 0;
+            {
+                var usedArc = new HashSet<CadArc>();
+                for (int i = 0; i < cadArcs.Count; i++)
+                {
+                    var a = cadArcs[i];
+                    CadArc bestB = null; double bestThick = 0, bestLo = 0, bestHi = 0, bestScore = double.MaxValue;
+                    for (int j = 0; j < cadArcs.Count; j++)
+                    {
+                        if (i == j) continue;
+                        var b = cadArcs[j];
+                        if (usedArc.Contains(b)) continue;
+                        if (Math.Abs(a.Cx - b.Cx) > tol * 2 || Math.Abs(a.Cy - b.Cy) > tol * 2) continue;
+                        var dr = Math.Abs(a.R - b.R);
+                        double thick = -1;
+                        foreach (var tk in thicknesses) if (Math.Abs(dr - tk) <= tol) { thick = tk; break; }
+                        if (thick < 0) continue;
+                        // angular overlap (intervals are CCW [A0, A1] with A1 > A0; try +-2pi shifts)
+                        double lo = 0, hi = 0, best = -1;
+                        foreach (var shift in new[] { -2 * Math.PI, 0.0, 2 * Math.PI })
+                        {
+                            var l = Math.Max(a.A0, b.A0 + shift); var h = Math.Min(a.A1, b.A1 + shift);
+                            if (h - l > best) { best = h - l; lo = l; hi = h; }
+                        }
+                        var midR = (a.R + b.R) / 2;
+                        if (best <= 0 || best * midR < minLen) continue;
+                        // prefer the closest radius partner (adjacent faces)
+                        var score = dr;
+                        if (score < bestScore) { bestScore = score; bestB = b; bestThick = thick; bestLo = lo; bestHi = hi; }
+                    }
+                    if (bestB == null) { if (!usedArc.Contains(a)) unpairedArcs++; continue; }
+                    usedArc.Add(a); usedArc.Add(bestB);
+                    curved.Add(new CurvedPiece
+                    {
+                        Cx = (a.Cx + bestB.Cx) / 2, Cy = (a.Cy + bestB.Cy) / 2,
+                        R = (a.R + bestB.R) / 2, A0 = bestLo, A1 = bestHi, Thickness = bestThick
+                    });
+                }
+            }
+
+            if (!dryRun && merged.Count + curved.Count > maxWalls)
                 throw new McpException(McpException.BadRequest,
-                    $"{merged.Count} walls would be created (max_walls={maxWalls}). Narrow bbox_mm or raise max_walls.");
+                    $"{merged.Count + curved.Count} walls would be created (max_walls={maxWalls}). Narrow bbox_mm or raise max_walls.");
 
             // ---- 4. resolve wall types by thickness --------------------------
             var basicTypes = new FilteredElementCollector(doc).OfClass(typeof(WallType)).Cast<WallType>()
@@ -622,6 +664,14 @@ namespace RevitMCP.Addin
                 foreach (var item in tm)
                     if (item is Dictionary<string, object> d && d.ContainsKey("thickness_mm") && d.ContainsKey("type_id"))
                         explicitMap[Convert.ToDouble(d["thickness_mm"])] = new ElementId(Convert.ToInt64(d["type_id"]));
+            bool createTypes = GetBoolOr(p, "create_missing_types", true);
+            string aiTag = p.ContainsKey("ai_tag") && p["ai_tag"] != null ? Convert.ToString(p["ai_tag"]) : "_AI";
+            var baseTypeId = GetOptLong(p, "base_type_id");
+            double typeTol = GetDoubleOr(p, "type_tolerance_mm", 10.0);       // reuse an existing type this close
+            int minPerType = GetIntOr(p, "min_walls_per_new_type", 3);        // fewer walls -> probably CAD noise, no new type
+            var thicknessCounts = merged.GroupBy(w => w.Thickness).ToDictionary(g => g.Key, g => g.Count());
+            foreach (var c in curved) thicknessCounts[c.Thickness] = (thicknessCounts.TryGetValue(c.Thickness, out var n0) ? n0 : 0) + 1;
+            var createdTypes = new List<string>();
             var typeCache = new Dictionary<double, WallType>();
             WallType ResolveType(double thick)
             {
@@ -631,10 +681,57 @@ namespace RevitMCP.Addin
                     if (Math.Abs(kv.Key - thick) <= tol) chosen = doc.GetElement(kv.Value) as WallType;
                 if (chosen == null && basicTypes.Count > 0)
                 {
-                    chosen = basicTypes.OrderBy(t => Math.Abs(FtToMm(t.Width) - thick)).First();
-                    var diff = Math.Abs(FtToMm(chosen.Width) - thick);
-                    if (diff > tol)
-                        warnings.Add($"No wall type is {thick} mm thick; using nearest '{chosen.Name}' ({Math.Round(FtToMm(chosen.Width), 1)} mm). Pass type_map to override.");
+                    // Reuse anything within tolerance (AI-made types from earlier runs included).
+                    var nearest = basicTypes.OrderBy(t => Math.Abs(FtToMm(t.Width) - thick)).First();
+                    var diff = Math.Abs(FtToMm(nearest.Width) - thick);
+                    int uses = thicknessCounts.TryGetValue(thick, out var n1) ? n1 : 0;
+                    if (diff <= typeTol) chosen = nearest;
+                    else if (createTypes && uses < minPerType)
+                    {
+                        chosen = nearest;
+                        warnings.Add($"{thick} mm: only {uses} wall(s) (min_walls_per_new_type={minPerType}) - treated as CAD noise, using '{nearest.Name}' ({Math.Round(FtToMm(nearest.Width), 1)} mm). Pass type_map to force a type.");
+                    }
+                    else if (createTypes && !dryRun)
+                    {
+                        var src = baseTypeId.HasValue ? doc.GetElement(new ElementId(baseTypeId.Value)) as WallType ?? nearest : nearest;
+                        var name = DeriveTypeName(src.Name, FtToMm(src.Width), thick, aiTag);
+                        var existing = basicTypes.FirstOrDefault(t => t.Name == name);
+                        if (existing != null) chosen = existing;
+                        else
+                        {
+                            try
+                            {
+                                var dup = src.Duplicate(name) as WallType;
+                                var cs = dup.GetCompoundStructure();
+                                int idx = cs.LayerCount == 1 ? 0 : cs.GetFirstCoreLayerIndex();
+                                if (idx < 0)
+                                {
+                                    idx = 0;
+                                    for (int k = 1; k < cs.LayerCount; k++) if (cs.GetLayerWidth(k) > cs.GetLayerWidth(idx)) idx = k;
+                                }
+                                var newLayer = FtToMm(cs.GetLayerWidth(idx)) + (thick - FtToMm(cs.GetWidth()));
+                                if (newLayer <= 0) throw new InvalidOperationException("core layer would become <= 0 mm");
+                                cs.SetLayerWidth(idx, MmToFt(newLayer));
+                                dup.SetCompoundStructure(cs);
+                                MarkAiType(dup, "create_walls_from_cad", src.Name);
+                                basicTypes.Add(dup);
+                                createdTypes.Add($"{name} ({thick} mm, from '{src.Name}')");
+                                chosen = dup;
+                            }
+                            catch (Exception ex)
+                            {
+                                warnings.Add($"Could not create a {thick} mm wall type from '{src.Name}' ({ex.Message}); using '{nearest.Name}' ({Math.Round(FtToMm(nearest.Width), 1)} mm).");
+                                chosen = nearest;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        chosen = nearest;
+                        warnings.Add(dryRun && createTypes
+                            ? $"{thick} mm: no wall type of that thickness; '{DeriveTypeName(nearest.Name, FtToMm(nearest.Width), thick, aiTag)}' will be created from '{nearest.Name}'."
+                            : $"No wall type is {thick} mm thick; using nearest '{nearest.Name}' ({Math.Round(FtToMm(nearest.Width), 1)} mm). Pass type_map to override.");
+                    }
                 }
                 if (chosen == null)
                     throw new McpException(McpException.NotFound, "No basic wall types in the document.");
@@ -664,9 +761,28 @@ namespace RevitMCP.Addin
                 return d;
             }
 
+            Dictionary<string, object> DescribeCurved(CurvedPiece c, WallType wt, Wall created)
+            {
+                var d = new Dictionary<string, object>
+                {
+                    ["curved"] = true,
+                    ["center"] = new[] { Math.Round(c.Cx, 1), Math.Round(c.Cy, 1) },
+                    ["radius_mm"] = Math.Round(c.R, 1),
+                    ["start"] = new[] { Math.Round(c.Cx + c.R * Math.Cos(c.A0), 1), Math.Round(c.Cy + c.R * Math.Sin(c.A0), 1) },
+                    ["end"] = new[] { Math.Round(c.Cx + c.R * Math.Cos(c.A1), 1), Math.Round(c.Cy + c.R * Math.Sin(c.A1), 1) },
+                    ["length_mm"] = Math.Round((c.A1 - c.A0) * c.R, 1),
+                    ["thickness_mm"] = c.Thickness,
+                    ["type"] = wt.Name,
+                    ["type_id"] = wt.Id.Value
+                };
+                if (created != null) d["id"] = created.Id.Value;
+                return d;
+            }
+
             if (dryRun)
             {
                 foreach (var w in merged.Take(500)) walls.Add(Describe(w, ResolveType(w.Thickness), null));
+                foreach (var c in curved.Take(200)) walls.Add(DescribeCurved(c, ResolveType(c.Thickness), null));
             }
             else
             {
@@ -698,6 +814,21 @@ namespace RevitMCP.Addin
                             failures.Add($"{Math.Round(w.T2 - w.T1)} mm wall @ offset {Math.Round(w.Offset)}: {ex.Message}");
                         }
                     }
+                    foreach (var c in curved)
+                    {
+                        var wt = ResolveType(c.Thickness);
+                        try
+                        {
+                            var centre = new XYZ(MmToFt(c.Cx), MmToFt(c.Cy), z);
+                            var arc = Arc.Create(centre, MmToFt(c.R), c.A0, c.A1, XYZ.BasisX, XYZ.BasisY);
+                            var wall = Wall.Create(doc, arc, wt.Id, level.Id, MmToFt(heightMm), 0, false, false);
+                            walls.Add(DescribeCurved(c, wt, wall));
+                        }
+                        catch (Exception ex)
+                        {
+                            failures.Add($"curved wall r={Math.Round(c.R)} @ ({Math.Round(c.Cx)}, {Math.Round(c.Cy)}): {ex.Message}");
+                        }
+                    }
                     if (ownTx) t.Commit();
                 }
                 finally
@@ -713,19 +844,92 @@ namespace RevitMCP.Addin
                 ["layers"] = layers.ToList(),
                 ["input"] = new Dictionary<string, object>
                 {
-                    ["lines"] = lineCount, ["polylines"] = polylineCount, ["arcs_skipped"] = arcCount,
+                    ["lines"] = lineCount, ["polylines"] = polylineCount, ["arcs"] = arcCount,
                     ["other_skipped"] = otherCount, ["segments"] = segs.Count
                 },
                 ["pairs"] = pieces.Count,
                 ["unpaired_segments"] = unpaired,
+                ["unpaired_examples"] = GetBoolOr(p, "report_unpaired", false)
+                    ? unpairedSegs.OrderByDescending(s => (s.X2 - s.X1) * (s.X2 - s.X1) + (s.Y2 - s.Y1) * (s.Y2 - s.Y1)).Take(GetIntOr(p, "report_limit", 100))
+                        .Select(s => new Dictionary<string, object>
+                        {
+                            ["start"] = new[] { Math.Round(s.X1, 1), Math.Round(s.Y1, 1) },
+                            ["end"] = new[] { Math.Round(s.X2, 1), Math.Round(s.Y2, 1) },
+                            ["length_mm"] = Math.Round(Math.Sqrt((s.X2 - s.X1) * (s.X2 - s.X1) + (s.Y2 - s.Y1) * (s.Y2 - s.Y1)), 1)
+                        }).ToList()
+                    : null,
+                ["curved_walls_planned"] = curved.Count,
+                ["unpaired_arcs"] = unpairedArcs,
+                ["types_created"] = createdTypes,
                 ["ends_snapped"] = snapped,
                 ["ends_extended_over_openings"] = extended,
-                ["walls_planned"] = merged.Count,
+                ["walls_planned"] = merged.Count + curved.Count,
                 ["walls_created"] = dryRun ? 0 : walls.Count,
                 ["walls"] = walls,
                 ["failures"] = failures,
                 ["warnings"] = warnings
             };
+        }
+
+        // A bounded arc from the DWG in mm; angles are CCW about +Z, A1 > A0.
+        private sealed class CadArc
+        {
+            public double Cx, Cy, R, A0, A1; public int Source;
+        }
+
+        private sealed class CurvedPiece
+        {
+            public double Cx, Cy, R, A0, A1, Thickness;
+        }
+
+        private static void AddArc(List<CadArc> arcs, Arc arc, double[] bbox, int source)
+        {
+            double cx = FtToMm(arc.Center.X), cy = FtToMm(arc.Center.Y), r = FtToMm(arc.Radius);
+            var s = arc.GetEndPoint(0); var e = arc.GetEndPoint(1); var m = arc.Evaluate(0.5, true);
+            if (bbox != null && !InBbox(bbox, FtToMm(m.X), FtToMm(m.Y))) return;
+            double a0 = Math.Atan2(FtToMm(s.Y) - cy, FtToMm(s.X) - cx);
+            double a1 = Math.Atan2(FtToMm(e.Y) - cy, FtToMm(e.X) - cx);
+            double am = Math.Atan2(FtToMm(m.Y) - cy, FtToMm(m.X) - cx);
+            // Order CCW: from a0 to a1 passing through am.
+            double Norm(double x) { while (x < 0) x += 2 * Math.PI; while (x >= 2 * Math.PI) x -= 2 * Math.PI; return x; }
+            var ccwSpan = Norm(a1 - a0); var toMid = Norm(am - a0);
+            if (toMid > ccwSpan) { var t = a0; a0 = a1; a1 = t; ccwSpan = Norm(a1 - a0); }
+            a0 = Norm(a0); a1 = a0 + ccwSpan;
+            arcs.Add(new CadArc { Cx = cx, Cy = cy, R = r, A0 = a0, A1 = a1, Source = source });
+        }
+
+        /// <summary>
+        /// Name for an AI-created type that follows the source type's convention:
+        /// the source's size number is replaced by the new one (e.g.
+        /// "SYB_WA_Generic_200mm" -> "SYB_WA_Generic_250mm", "W900 x H2100" ->
+        /// "W1150 x H2100"), then the AI tag is appended.
+        /// </summary>
+        private static string DeriveTypeName(string sourceName, double sourceValue, double newValue, string aiTag)
+        {
+            var oldNum = Math.Round(sourceValue).ToString(System.Globalization.CultureInfo.InvariantCulture);
+            var newNum = Math.Round(newValue).ToString(System.Globalization.CultureInfo.InvariantCulture);
+            string name;
+            var m = System.Text.RegularExpressions.Regex.Match(sourceName ?? "", @"(?<!\d)" + oldNum + @"(?!\d)");
+            if (m.Success) name = sourceName.Substring(0, m.Index) + newNum + sourceName.Substring(m.Index + m.Length);
+            else name = (sourceName ?? "Type") + " " + newNum + "mm";
+            // strip a tag the source may already carry (AI type derived from an AI type)
+            if (!string.IsNullOrEmpty(aiTag) && name.EndsWith(aiTag)) name = name.Substring(0, name.Length - aiTag.Length);
+            return name + (aiTag ?? "");
+        }
+
+        /// <summary>Record provenance on an AI-created type (Type Comments + Description if writable).</summary>
+        private static void MarkAiType(ElementType type, string tool, string sourceName)
+        {
+            var note = $"AI (RevitMCP {tool}) {DateTime.Now:yyyy-MM-dd}, duplicated from '{sourceName}'";
+            foreach (var bip in new[] { BuiltInParameter.ALL_MODEL_TYPE_COMMENTS, BuiltInParameter.ALL_MODEL_DESCRIPTION })
+            {
+                try
+                {
+                    var prm = type.get_Parameter(bip);
+                    if (prm != null && !prm.IsReadOnly && prm.StorageType == StorageType.String) prm.Set(note);
+                }
+                catch { /* best effort */ }
+            }
         }
 
         // True if more than half of [lo, hi] on this segment is already used by a same-source wall.

@@ -145,7 +145,9 @@ namespace RevitMCP.Addin
             var bbox = GetOptBboxMm(p);
             double tol = GetDoubleOr(p, "tolerance_mm", 5.0);
             double hostTol = GetDoubleOr(p, "host_tolerance_mm", 60.0);   // hinge may sit on the face or the centreline
-            double widthTol = GetDoubleOr(p, "width_tolerance_mm", 30.0);
+            double widthTol = GetDoubleOr(p, "width_tolerance_mm", 50.0);   // reuse an existing type this close
+            double widthStep = GetDoubleOr(p, "width_step_mm", 50.0);       // new types are rounded to this grid
+            string aiTag = p.ContainsKey("ai_tag") && p["ai_tag"] != null ? Convert.ToString(p["ai_tag"]) : "_AI";
             double minSweep = GetDoubleOr(p, "min_sweep_deg", 60.0);
             double maxSweep = GetDoubleOr(p, "max_sweep_deg", 120.0);
             double minWidth = GetDoubleOr(p, "min_width_mm", 250.0);          // smallest leaf (asymmetric doors have ~300 mm leaves)
@@ -303,7 +305,10 @@ namespace RevitMCP.Addin
             var createdTypes = new List<string>();
             FamilySymbol ResolveDoorType(string kind, double width)
             {
-                var key = kind + ":" + Math.Round(width);
+                // Types are created on a coarse grid (width_step_mm) and reused within
+                // width_tolerance_mm, so CAD noise (1170 / 1180 / 1165) yields ONE type.
+                var nominal = widthStep > 0 ? Math.Round(width / widthStep) * widthStep : Math.Round(width);
+                var key = kind + ":" + nominal;
                 if (typeCache.TryGetValue(key, out var cached)) return cached;
                 FamilySymbol chosen = null;
                 foreach (var kv in explicitMap)
@@ -316,25 +321,33 @@ namespace RevitMCP.Addin
                     if (kind == "double") pool = pool.Where(s => !(s.FamilyName ?? "").ToLowerInvariant().Contains("asym") && !(s.FamilyName ?? "").Contains("子母")).ToList();
                     if (pool.Count == 0) pool = symbols;
                     if (pool.Count == 0) throw new McpException(McpException.NotFound, "No door families loaded in the document.");
+                    // 1. an existing type within tolerance of the CAD width (or of the nominal width)
                     var nearest = pool.OrderBy(s => Math.Abs(SymWidth(s) - width)).First();
                     var diff = Math.Abs(SymWidth(nearest) - width);
+                    var nearestNominal = pool.OrderBy(s => Math.Abs(SymWidth(s) - nominal)).First();
                     if (diff <= widthTol) chosen = nearest;
+                    else if (Math.Abs(SymWidth(nearestNominal) - nominal) <= widthTol) chosen = nearestNominal;
                     else if (createTypes && kind != "asymmetric" && !dryRun)
                     {
+                        // 2. duplicate the nearest type, following its naming convention
+                        var name = DeriveTypeName(nearest.Name, SymWidth(nearest), nominal, aiTag);
+                        var byName = symbols.FirstOrDefault(s => s.FamilyName == nearest.FamilyName && s.Name == name);
                         var wp = SymWidthParam(nearest);
-                        if (wp != null)
+                        if (byName != null) chosen = byName;
+                        else if (wp != null)
                         {
                             try
                             {
-                                var newName = $"W{Math.Round(width)} (MCP from {nearest.Name})";
-                                var dup = nearest.Duplicate(newName) as FamilySymbol;
-                                dup.get_Parameter(wp.Definition)?.Set(MmToFt(width));
+                                var dup = nearest.Duplicate(name) as FamilySymbol;
+                                dup.get_Parameter(wp.Definition)?.Set(MmToFt(nominal));
+                                MarkAiType(dup, "create_doors_from_cad", nearest.FamilyName + ": " + nearest.Name);
+                                symbols.Add(dup);
                                 chosen = dup;
-                                createdTypes.Add($"{dup.FamilyName}: {newName}");
+                                createdTypes.Add($"{dup.FamilyName}: {name} ({nominal} mm, from '{nearest.Name}')");
                             }
                             catch (Exception ex)
                             {
-                                warnings.Add($"Could not create a {Math.Round(width)} mm type from '{nearest.FamilyName}: {nearest.Name}' ({ex.Message}); using it as is.");
+                                warnings.Add($"Could not create a {nominal} mm type from '{nearest.FamilyName}: {nearest.Name}' ({ex.Message}); using it as is.");
                                 chosen = nearest;
                             }
                         }
@@ -347,7 +360,7 @@ namespace RevitMCP.Addin
                     else
                     {
                         if (dryRun && createTypes && kind != "asymmetric")
-                            warnings.Add($"{kind} {Math.Round(width)} mm: no matching type; a new type will be duplicated from '{nearest.FamilyName}: {nearest.Name}'.");
+                            warnings.Add($"{kind} {Math.Round(width)} mm: no type within {widthTol} mm; '{DeriveTypeName(nearest.Name, SymWidth(nearest), nominal, aiTag)}' will be created from '{nearest.FamilyName}: {nearest.Name}'.");
                         else
                             warnings.Add($"{kind} {Math.Round(width)} mm: nearest type is '{nearest.FamilyName}: {nearest.Name}' ({Math.Round(SymWidth(nearest))} mm).");
                         chosen = nearest;
