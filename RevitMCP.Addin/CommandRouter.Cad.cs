@@ -367,6 +367,7 @@ namespace RevitMCP.Addin
             double angleTol = GetDoubleOr(p, "angle_tolerance_deg", 0.5);
             double minLen = GetDoubleOr(p, "min_length_mm", 300.0);
             double mergeGap = GetDoubleOr(p, "merge_gap_mm", 300.0);   // small: windows must stay open
+            double laneTol = GetDoubleOr(p, "merge_offset_tolerance_mm", 25.0); // collinear pieces may be this far apart sideways
             int maxWalls = GetIntOr(p, "max_walls", 1000);
             var warnings = new List<string>();
 
@@ -408,7 +409,8 @@ namespace RevitMCP.Addin
                 if (p.ContainsKey(key) && p[key] is IEnumerable ol && !(p[key] is string))
                     foreach (var item in ol) if (item != null) doorLayers.Add(Convert.ToString(item));
             double maxOpening = GetDoubleOr(p, "max_opening_mm", 3000.0);
-            var openingPts = new List<double[]>(); // [x, y] in mm - points of door swing arcs
+            // Each swing arc: hinge (centre), the two end points, leaf width.
+            var doorArcs = new List<double[]>(); // hx, hy, e1x, e1y, e2x, e2y, r
             if (doorLayers.Count > 0)
             {
                 foreach (var prim in EnumerateCad(doc, li))
@@ -418,23 +420,42 @@ namespace RevitMCP.Addin
                     if (sweep < 45 || sweep > 200) continue; // door swings are ~90 (or 180) degrees
                     var r = FtToMm(darc.Radius);
                     if (r < 250 || r > 3000) continue;
-                    openingPts.Add(new[] { FtToMm(darc.Center.X), FtToMm(darc.Center.Y) });
-                    openingPts.Add(new[] { FtToMm(darc.GetEndPoint(0).X), FtToMm(darc.GetEndPoint(0).Y) });
-                    openingPts.Add(new[] { FtToMm(darc.GetEndPoint(1).X), FtToMm(darc.GetEndPoint(1).Y) });
+                    doorArcs.Add(new[]
+                    {
+                        FtToMm(darc.Center.X), FtToMm(darc.Center.Y),
+                        FtToMm(darc.GetEndPoint(0).X), FtToMm(darc.GetEndPoint(0).Y),
+                        FtToMm(darc.GetEndPoint(1).X), FtToMm(darc.GetEndPoint(1).Y), r
+                    });
                 }
             }
-            // Is there door-swing geometry inside the corridor of wall w between params ta..tb?
+            // Does a door that BELONGS TO wall w sit in the gap ta..tb? Belonging means:
+            // hinge and latch (the arc end on the wall) both lie in w's corridor, the
+            // closed leaf (hinge -> latch) runs along w, and both are inside the gap.
+            // A door of a crossing/nearby wall must not bridge this wall's gap.
             bool OpeningBetween(WallPiece w, double ta, double tb)
             {
-                if (openingPts.Count == 0) return false;
-                var lo = Math.Min(ta, tb); var hi = Math.Max(ta, tb);
-                var half = w.Thickness / 2 + tol;
-                foreach (var q in openingPts)
+                if (doorArcs.Count == 0) return false;
+                var lo = Math.Min(ta, tb) - 150; var hi = Math.Max(ta, tb) + 150;
+                var half = w.Thickness / 2 + 60; // hinge/latch may sit on a face or the centreline
+                foreach (var a in doorArcs)
                 {
-                    var t = w.Dx * q[0] + w.Dy * q[1];
-                    if (t < lo || t > hi) continue;
-                    var off = w.Nx * q[0] + w.Ny * q[1];
-                    if (Math.Abs(off - w.Offset) <= half) return true;
+                    var offH = Math.Abs(w.Nx * a[0] + w.Ny * a[1] - w.Offset);
+                    if (offH > half) continue;
+                    var tH = w.Dx * a[0] + w.Dy * a[1];
+                    if (tH < lo || tH > hi) continue;
+                    // latch = the arc end nearer the wall line
+                    var off1 = Math.Abs(w.Nx * a[2] + w.Ny * a[3] - w.Offset);
+                    var off2 = Math.Abs(w.Nx * a[4] + w.Ny * a[5] - w.Offset);
+                    double lx, ly, offL;
+                    if (off1 <= off2) { lx = a[2]; ly = a[3]; offL = off1; } else { lx = a[4]; ly = a[5]; offL = off2; }
+                    if (offL > half) continue;
+                    var tL = w.Dx * lx + w.Dy * ly;
+                    if (tL < lo || tL > hi) continue;
+                    // closed leaf must run along the wall (not across it)
+                    var cx = lx - a[0]; var cy = ly - a[1]; var clen = Math.Sqrt(cx * cx + cy * cy);
+                    if (clen < 1) continue;
+                    if (Math.Abs((cx * w.Dx + cy * w.Dy) / clen) < 0.97) continue;
+                    return true;
                 }
                 return false;
             }
@@ -450,17 +471,20 @@ namespace RevitMCP.Addin
 
             // Group by direction. Angles near 180 wrap to near 0: treat those as one group
             // by testing both plain and wrapped differences.
+            // Split into direction groups wherever consecutive angles differ by more
+            // than angleTol (gap-based, so results don't depend on which segment
+            // happens to start a group).
             var groups = new List<List<Seg>>();
             foreach (var s in byAngle)
             {
                 var g = groups.LastOrDefault();
-                if (g != null && Math.Abs(s.Angle - g[0].Angle) <= angleTol) g.Add(s);
+                if (g != null && Math.Abs(s.Angle - g[g.Count - 1].Angle) <= angleTol) g.Add(s);
                 else groups.Add(new List<Seg> { s });
             }
             if (groups.Count > 1)
             {
                 var first = groups[0]; var last = groups[groups.Count - 1];
-                if (Math.Abs(last[0].Angle - 180.0 - first[0].Angle) <= angleTol)
+                if (Math.Abs(last[last.Count - 1].Angle - 180.0 - first[0].Angle) <= angleTol)
                 {
                     // Same direction (a line at 179.8 deg is a line at -0.2 deg): merge into the
                     // first group; every group is re-framed to a common direction below.
@@ -472,8 +496,8 @@ namespace RevitMCP.Addin
             foreach (var g in groups)
             {
                 if (g.Count < 2) continue;
-                // Use one common frame per group so offsets are comparable.
-                var refSeg = g[0];
+                // Use one common frame per group (its median direction) so offsets are comparable.
+                var refSeg = g.OrderBy(x => x.Angle).ElementAt(g.Count / 2);
                 foreach (var s in g)
                 {
                     s.Dx = refSeg.Dx; s.Dy = refSeg.Dy; s.Nx = refSeg.Nx; s.Ny = refSeg.Ny;
@@ -506,11 +530,15 @@ namespace RevitMCP.Addin
                         // plaster lines hugging a face (closer than the thinnest wall) are
                         // ignored so a 250 outline with 44 mm inner lines still pairs.
                         double minFace = thicknesses.Min() - tol;
+                        double mid = (a.Offset + b.Offset) / 2;
                         bool blocked = false;
                         for (int k = i + 1; k < j && !blocked; k++)
                         {
                             var c = sorted[k];
                             if (c.Offset - a.Offset < minFace || b.Offset - c.Offset < minFace) continue;
+                            // A line exactly half-way is the wall's own drawn centreline
+                            // (faces + centreline convention), not another face.
+                            if (Math.Abs(c.Offset - mid) <= tol) continue;
                             var ov = Math.Min(hi, c.T2) - Math.Max(lo, c.T1);
                             if (ov > 0.3 * (hi - lo)) blocked = true;
                         }
@@ -544,13 +572,47 @@ namespace RevitMCP.Addin
 
             // ---- 3. merge collinear pieces (same direction, thickness, offset) --
             var merged = new List<WallPiece>();
-            foreach (var grp in pieces.GroupBy(w => new { Dx = Math.Round(w.Dx, 4), Dy = Math.Round(w.Dy, 4), w.Thickness }))
+            // Cluster pieces by direction (angle gaps <= angleTol) and put every piece of a
+            // cluster into one common frame, so near-collinear pieces from different
+            // segment groups still land in the same lane.
+            double PieceAngle(WallPiece w) { var a = Math.Atan2(w.Dy, w.Dx) * 180.0 / Math.PI; if (a < 0) a += 180; if (a >= 180 - 1e-9) a -= 180; return a; }
+            var clusters = new List<List<WallPiece>>();
+            foreach (var w in pieces.OrderBy(PieceAngle))
+            {
+                var c = clusters.LastOrDefault();
+                if (c != null && Math.Abs(PieceAngle(w) - PieceAngle(c[c.Count - 1])) <= angleTol) c.Add(w);
+                else clusters.Add(new List<WallPiece> { w });
+            }
+            if (clusters.Count > 1)
+            {
+                var first = clusters[0]; var last = clusters[clusters.Count - 1];
+                if (Math.Abs(PieceAngle(last[last.Count - 1]) - 180.0 - PieceAngle(first[0])) <= angleTol)
+                { first.AddRange(last); clusters.RemoveAt(clusters.Count - 1); }
+            }
+            foreach (var cl in clusters)
+            {
+                var refP = cl.OrderBy(PieceAngle).ElementAt(cl.Count / 2);
+                foreach (var w in cl)
+                {
+                    // endpoints in world coords, then re-frame
+                    var sx = w.Dx * w.T1 + w.Nx * w.Offset; var sy = w.Dy * w.T1 + w.Ny * w.Offset;
+                    var ex = w.Dx * w.T2 + w.Nx * w.Offset; var ey = w.Dy * w.T2 + w.Ny * w.Offset;
+                    w.Dx = refP.Dx; w.Dy = refP.Dy; w.Nx = refP.Nx; w.Ny = refP.Ny;
+                    w.Offset = (w.Nx * sx + w.Ny * sy + w.Nx * ex + w.Ny * ey) / 2;
+                    var t1 = w.Dx * sx + w.Dy * sy; var t2 = w.Dx * ex + w.Dy * ey;
+                    w.T1 = Math.Min(t1, t2); w.T2 = Math.Max(t1, t2);
+                }
+            }
+            foreach (var grp in pieces.GroupBy(w => new { Dx = Math.Round(w.Dx, 6), Dy = Math.Round(w.Dy, 6), w.Thickness }))
             {
                 var byOffset = grp.OrderBy(w => w.Offset).ThenBy(w => w.T1).ToList();
                 var lane = new List<WallPiece>();
                 void FlushLane()
                 {
                     if (lane.Count == 0) return;
+                    // Pieces in a lane may be a few mm apart sideways (CAD sloppiness);
+                    // put them all on the longest piece's centerline.
+                    var refOff = lane.OrderByDescending(x => x.T2 - x.T1).First().Offset;
                     WallPiece cur = null;
                     foreach (var w in lane.OrderBy(x => x.T1))
                     {
@@ -560,14 +622,14 @@ namespace RevitMCP.Addin
                             cur.T2 = Math.Max(cur.T2, w.T2);
                             continue;
                         }
-                        cur = new WallPiece { Dx = w.Dx, Dy = w.Dy, Nx = w.Nx, Ny = w.Ny, Offset = w.Offset, T1 = w.T1, T2 = w.T2, Thickness = w.Thickness };
+                        cur = new WallPiece { Dx = w.Dx, Dy = w.Dy, Nx = w.Nx, Ny = w.Ny, Offset = refOff, T1 = w.T1, T2 = w.T2, Thickness = w.Thickness };
                         merged.Add(cur);
                     }
                     lane.Clear();
                 }
                 foreach (var w in byOffset)
                 {
-                    if (lane.Count > 0 && Math.Abs(w.Offset - lane[0].Offset) > tol) FlushLane();
+                    if (lane.Count > 0 && Math.Abs(w.Offset - lane[0].Offset) > laneTol) FlushLane();
                     lane.Add(w);
                 }
                 FlushLane();
@@ -601,6 +663,31 @@ namespace RevitMCP.Addin
                     if (dup) dedup++; else kept.Add(w);
                 }
                 merged = kept;
+            }
+
+            // ---- 3a2. close door gaps between collinear pieces of DIFFERENT thickness --
+            // (200 wall, door, 250 wall): they can't share a lane, so extend the earlier
+            // piece to the later piece's start when a door sits in the gap. Both keep
+            // their thickness; Revit joins them end to end.
+            int crossThickBridged = 0;
+            {
+                var byDir = merged.GroupBy(w => new { Dx = Math.Round(w.Dx, 6), Dy = Math.Round(w.Dy, 6) });
+                foreach (var grp in byDir)
+                {
+                    var list = grp.OrderBy(w => w.Offset).ThenBy(w => w.T1).ToList();
+                    for (int i = 0; i < list.Count; i++)
+                        for (int k = i + 1; k < list.Count; k++)
+                        {
+                            var a = list[i]; var b = list[k];
+                            if (b.Offset - a.Offset > laneTol) break;
+                            if (a.Thickness == b.Thickness) continue;
+                            WallPiece lo = a.T2 <= b.T1 ? a : b, hi = lo == a ? b : a;
+                            var gap = hi.T1 - lo.T2;
+                            if (gap <= 0 || gap > maxOpening) continue;
+                            if (!OpeningBetween(lo, lo.T2, hi.T1)) continue;
+                            lo.T2 = hi.T1; crossThickBridged++;
+                        }
+                }
             }
 
             // ---- 3b. snap ends to the centerline of the wall they run into ------
@@ -865,8 +952,9 @@ namespace RevitMCP.Addin
 
             if (dryRun)
             {
-                foreach (var w in merged.Take(500)) walls.Add(Describe(w, ResolveType(w.Thickness), null));
-                foreach (var c in curved.Take(200)) walls.Add(DescribeCurved(c, ResolveType(c.Thickness), null));
+                int cap = GetIntOr(p, "report_limit", 500);
+                foreach (var w in merged.Take(cap)) walls.Add(Describe(w, ResolveType(w.Thickness), null));
+                foreach (var c in curved.Take(cap)) walls.Add(DescribeCurved(c, ResolveType(c.Thickness), null));
             }
             else
             {
@@ -947,6 +1035,7 @@ namespace RevitMCP.Addin
                 ["types_created"] = createdTypes,
                 ["ends_snapped"] = snapped,
                 ["ends_extended_over_openings"] = extended,
+                ["door_gaps_bridged_across_thickness"] = crossThickBridged,
                 ["walls_planned"] = merged.Count + curved.Count,
                 ["skipped_existing"] = skippedExisting,
                 ["dropped_duplicates"] = dedup,

@@ -84,6 +84,7 @@ namespace RevitMCP.Addin
                 case "get_cad_geometry":      return GetCadGeometry(RequireDoc(uidoc), p);
                 case "create_walls_from_cad": return CreateWallsFromCad(uidoc, p);
                 case "create_doors_from_cad": return CreateDoorsFromCad(uidoc, p);
+                case "snapshot_region":       return SnapshotRegion(uidoc, p);
 
                 default:
                     throw new McpException(McpException.UnknownCommand, $"Unknown command: {command}");
@@ -449,6 +450,231 @@ namespace RevitMCP.Addin
                 throw new McpException(McpException.Unsupported,
                     $"Export of view '{view.Name}' produced no image (not a graphical view?).");
             return new Dictionary<string, object> { ["view"] = view.Name, ["path"] = file };
+        }
+
+        /// <summary>
+        /// snapshot_region: PNG of a rectangular region of a plan view. The view's crop
+        /// box is temporarily set to the region inside a TransactionGroup that is rolled
+        /// back after the export, so the model/view are left untouched.
+        /// </summary>
+        private static Dictionary<string, object> SnapshotRegion(UIDocument uidoc, Dictionary<string, object> p)
+        {
+            var doc = RequireDoc(uidoc);
+            var view = GetView(uidoc, GetOptLong(p, "view_id"));
+            if (!(view is ViewPlan))
+                throw new McpException(McpException.BadRequest, $"View '{view.Name}' is not a plan view; pass view_id of a floor plan.");
+            var bbox = GetOptBboxMm(p) ?? throw new McpException(McpException.BadRequest, "'bbox_mm' ([[xmin, ymin], [xmax, ymax]]) is required.");
+            int pixels = Math.Min(Math.Max(GetIntOr(p, "pixels", 1600), 200), 6000);
+            var hideCats = new List<string>();
+            if (p.ContainsKey("hide_categories") && p["hide_categories"] is IEnumerable hc && !(p["hide_categories"] is string))
+                foreach (var item in hc) if (item != null) hideCats.Add(Convert.ToString(item));
+
+            var dir = Path.Combine(Path.GetTempPath(), "RevitMCP", Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            string file = null;
+            var opts = new ImageExportOptions
+            {
+                FilePath = Path.Combine(dir, "region"),
+                ExportRange = ExportRange.SetOfViews,
+                ZoomType = ZoomFitType.FitToPage,
+                PixelSize = pixels,
+                FitDirection = (bbox[2] - bbox[0]) >= (bbox[3] - bbox[1]) ? FitDirectionType.Horizontal : FitDirectionType.Vertical,
+                HLRandWFViewsFileType = ImageFileType.PNG,
+                ShadowViewsFileType = ImageFileType.PNG
+            };
+            opts.SetViewsAndSheets(new List<ElementId> { view.Id });
+
+            var uiview = uidoc.GetOpenUIViews().FirstOrDefault(v => v.ViewId == view.Id);
+            var vp = (ViewPlan)view;
+            var z0 = vp.GenLevel != null ? vp.GenLevel.Elevation : 0;
+            var pMin = new XYZ(MmToFt(bbox[0]), MmToFt(bbox[1]), z0);
+            var pMax = new XYZ(MmToFt(bbox[2]), MmToFt(bbox[3]), z0);
+
+            bool hideLinks = GetBoolOr(p, "hide_links", false);
+            bool highlight = GetBoolOr(p, "highlight", false);
+
+            // Temporary view tweaks (own transaction if none is open), restored afterwards:
+            // hidden categories, hidden CAD links, and colour highlights for walls/doors.
+            var hiddenNow = new List<ElementId>();
+            var hiddenLinks = new List<ElementId>();
+            var savedOverrides = new Dictionary<ElementId, OverrideGraphicSettings>();
+            void SetHidden(bool hide)
+            {
+                if (hideCats.Count == 0 && !hideLinks && !highlight) return;
+                var ownTx = !doc.IsModifiable;
+                var t = ownTx ? new Transaction(doc, "MCP: snapshot view tweaks") : null;
+                try
+                {
+                    if (ownTx)
+                    {
+                        t.Start();
+                        var fh = t.GetFailureHandlingOptions();
+                        fh.SetFailuresPreprocessor(new SilentFailures());
+                        t.SetFailureHandlingOptions(fh);
+                    }
+                    if (hide)
+                    {
+                        foreach (var name in hideCats)
+                        {
+                            var bic = TryParseCategory(name);
+                            if (bic == null) continue;
+                            var cat = Category.GetCategory(doc, bic.Value);
+                            if (cat != null && view.CanCategoryBeHidden(cat.Id) && !view.GetCategoryHidden(cat.Id))
+                            { view.SetCategoryHidden(cat.Id, true); hiddenNow.Add(cat.Id); }
+                        }
+                        if (hideLinks)
+                        {
+                            var links = new FilteredElementCollector(doc, view.Id).OfClass(typeof(ImportInstance))
+                                .Where(e => e.CanBeHidden(view)).Select(e => e.Id).ToList();
+                            if (links.Count > 0) { view.HideElements(links); hiddenLinks.AddRange(links); }
+                        }
+                        if (highlight)
+                        {
+                            var solid = new FilteredElementCollector(doc).OfClass(typeof(FillPatternElement)).Cast<FillPatternElement>()
+                                .FirstOrDefault(f => f.GetFillPattern().IsSolidFill);
+                            void Paint(BuiltInCategory bic, Color color, int lineWeight)
+                            {
+                                var cat = Category.GetCategory(doc, bic);
+                                if (cat == null) return;
+                                savedOverrides[cat.Id] = view.GetCategoryOverrides(cat.Id);
+                                var ogs = new OverrideGraphicSettings()
+                                    .SetProjectionLineColor(color).SetProjectionLineWeight(lineWeight)
+                                    .SetCutLineColor(color).SetCutLineWeight(lineWeight);
+                                if (solid != null)
+                                    ogs.SetCutForegroundPatternId(solid.Id).SetCutForegroundPatternColor(color)
+                                       .SetSurfaceForegroundPatternId(solid.Id).SetSurfaceForegroundPatternColor(color);
+                                view.SetCategoryOverrides(cat.Id, ogs);
+                            }
+                            Paint(BuiltInCategory.OST_Walls, new Color(220, 40, 40), 3);
+                            Paint(BuiltInCategory.OST_Doors, new Color(30, 90, 220), 5);
+                            Paint(BuiltInCategory.OST_Windows, new Color(30, 160, 60), 5);
+                        }
+                    }
+                    else
+                    {
+                        foreach (var id in hiddenNow) view.SetCategoryHidden(id, false);
+                        if (hiddenLinks.Count > 0) view.UnhideElements(hiddenLinks);
+                        foreach (var kv in savedOverrides) view.SetCategoryOverrides(kv.Key, kv.Value);
+                    }
+                    if (ownTx) t.Commit();
+                }
+                finally { t?.Dispose(); }
+            }
+
+            if (!doc.IsModifiable)
+            {
+                // Preferred: duplicate the plan, crop the copy to the region, export that
+                // view (rendered from the model, so it is never stale), delete the copy.
+                ElementId tempId = ElementId.InvalidElementId;
+                using (var t = new Transaction(doc, "MCP: snapshot region"))
+                {
+                    t.Start();
+                    var fh = t.GetFailureHandlingOptions();
+                    fh.SetFailuresPreprocessor(new SilentFailures());
+                    t.SetFailureHandlingOptions(fh);
+                    tempId = view.Duplicate(ViewDuplicateOption.Duplicate);
+                    var tv = (View)doc.GetElement(tempId);
+                    tv.Name = "MCP snapshot " + Guid.NewGuid().ToString("N").Substring(0, 8);
+                    tv.CropBoxActive = true; tv.CropBoxVisible = false;
+                    tv.CropBox = new BoundingBoxXYZ { Min = new XYZ(pMin.X, pMin.Y, z0 - 10), Max = new XYZ(pMax.X, pMax.Y, z0 + 30) };
+                    // detail so doors/walls draw fully; hide annotation clutter
+                    try { tv.DetailLevel = ViewDetailLevel.Medium; } catch { /* ignore */ }
+                    foreach (var name in hideCats)
+                    {
+                        var bic = TryParseCategory(name);
+                        if (bic == null) continue;
+                        var cat = Category.GetCategory(doc, bic.Value);
+                        if (cat != null && tv.CanCategoryBeHidden(cat.Id)) tv.SetCategoryHidden(cat.Id, true);
+                    }
+                    if (hideLinks)
+                    {
+                        var links = new FilteredElementCollector(doc, tv.Id).OfClass(typeof(ImportInstance))
+                            .Where(e => e.CanBeHidden(tv)).Select(e => e.Id).ToList();
+                        if (links.Count > 0) tv.HideElements(links);
+                    }
+                    if (highlight)
+                    {
+                        var solid = new FilteredElementCollector(doc).OfClass(typeof(FillPatternElement)).Cast<FillPatternElement>()
+                            .FirstOrDefault(f => f.GetFillPattern().IsSolidFill);
+                        void Paint(BuiltInCategory bic, Color color, int lineWeight)
+                        {
+                            var cat = Category.GetCategory(doc, bic);
+                            if (cat == null) return;
+                            var ogs = new OverrideGraphicSettings()
+                                .SetProjectionLineColor(color).SetProjectionLineWeight(lineWeight)
+                                .SetCutLineColor(color).SetCutLineWeight(lineWeight);
+                            if (solid != null)
+                                ogs.SetCutForegroundPatternId(solid.Id).SetCutForegroundPatternColor(color)
+                                   .SetSurfaceForegroundPatternId(solid.Id).SetSurfaceForegroundPatternColor(color);
+                            tv.SetCategoryOverrides(cat.Id, ogs);
+                        }
+                        Paint(BuiltInCategory.OST_Walls, new Color(220, 40, 40), 3);
+                        Paint(BuiltInCategory.OST_Doors, new Color(30, 90, 220), 5);
+                        Paint(BuiltInCategory.OST_Windows, new Color(30, 160, 60), 5);
+                    }
+                    t.Commit();
+                }
+                try
+                {
+                    opts.SetViewsAndSheets(new List<ElementId> { tempId });
+                    doc.ExportImage(opts);
+                    file = Directory.GetFiles(dir).FirstOrDefault();
+                }
+                finally
+                {
+                    using (var t = new Transaction(doc, "MCP: snapshot cleanup"))
+                    {
+                        t.Start();
+                        try { doc.Delete(tempId); } catch { /* ignore */ }
+                        t.Commit();
+                    }
+                }
+            }
+            else if (uiview != null && uidoc.ActiveView.Id == view.Id)
+            {
+                // Inside an open transaction (execute_code): zoom the UI window to the
+                // region and export what is visible. May lag behind model changes made
+                // in the same command.
+                var corners = uiview.GetZoomCorners();
+                try
+                {
+                    var rect = uiview.GetWindowRectangle();
+                    double wpx = Math.Max(1, rect.Right - rect.Left), hpx = Math.Max(1, rect.Bottom - rect.Top);
+                    double aspect = wpx / hpx;
+                    double w = pMax.X - pMin.X, h = pMax.Y - pMin.Y;
+                    double cx = (pMin.X + pMax.X) / 2, cy = (pMin.Y + pMax.Y) / 2;
+                    if (w / h < aspect) w = h * aspect; else h = w / aspect;
+                    pMin = new XYZ(cx - w / 2, cy - h / 2, z0); pMax = new XYZ(cx + w / 2, cy + h / 2, z0);
+                }
+                catch { /* keep the requested rectangle */ }
+                try
+                {
+                    SetHidden(true);
+                    try { doc.Regenerate(); uidoc.RefreshActiveView(); } catch { /* ignore */ }
+                    uiview.ZoomAndCenterRectangle(pMin, pMax);
+                    try { uidoc.RefreshActiveView(); } catch { /* ignore */ }
+                    opts.ExportRange = ExportRange.VisibleRegionOfCurrentView;
+                    doc.ExportImage(opts);
+                    file = Directory.GetFiles(dir).FirstOrDefault();
+                }
+                finally
+                {
+                    try { uiview.ZoomAndCenterRectangle(corners[0], corners[1]); } catch { /* ignore */ }
+                    SetHidden(false);
+                }
+            }
+            else
+                throw new McpException(McpException.BadRequest,
+                    "snapshot_region cannot run inside an open transaction unless the target view is the active view.");
+            if (file == null)
+                throw new McpException(McpException.Unsupported, $"Export of view '{view.Name}' produced no image.");
+            return new Dictionary<string, object>
+            {
+                ["view"] = view.Name,
+                ["bbox_mm"] = new[] { bbox[0], bbox[1], bbox[2], bbox[3] },
+                ["captured_bbox_mm"] = new[] { Math.Round(FtToMm(pMin.X)), Math.Round(FtToMm(pMin.Y)), Math.Round(FtToMm(pMax.X)), Math.Round(FtToMm(pMax.Y)) },
+                ["path"] = file
+            };
         }
 
         // ==================== write commands =================================

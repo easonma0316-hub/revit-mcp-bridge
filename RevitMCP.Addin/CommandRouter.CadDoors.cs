@@ -203,7 +203,13 @@ namespace RevitMCP.Addin
                     var off2 = Math.Abs(w.Nx * a.E2x + w.Ny * a.E2y - w.Offset);
                     var onWall = Math.Min(off1, off2);
                     if (onWall > w.HalfThick + hostTol) continue;
-                    var score = offH + onWall;
+                    // Prefer the wall that contains the whole opening (hinge..latch); a wall
+                    // that merely ends next to the hinge is penalised by how far the opening
+                    // sticks out beyond it.
+                    var tLatch = off1 <= off2 ? w.Dx * a.E1x + w.Dy * a.E1y : w.Dx * a.E2x + w.Dy * a.E2y;
+                    var oLo = Math.Min(tH, tLatch); var oHi = Math.Max(tH, tLatch);
+                    var outside = Math.Max(0, w.T1 - oLo) + Math.Max(0, oHi - w.T2);
+                    var score = offH + onWall + outside;
                     if (score < bestScore) { bestScore = score; best = w; }
                 }
                 if (best == null)
@@ -266,6 +272,19 @@ namespace RevitMCP.Addin
                 }
                 plan.FaceX = w.Nx * faceSign; plan.FaceY = w.Ny * faceSign;
                 plans.Add(plan);
+            }
+
+            // Drawings often carry a door twice (existing + new layer overlaid): keep one
+            // plan per opening (centres within 200 mm).
+            int dupPlans = 0;
+            {
+                var unique = new List<DoorPlan>();
+                foreach (var d in plans)
+                {
+                    if (unique.Any(u => Math.Abs(u.Cx - d.Cx) <= 200 && Math.Abs(u.Cy - d.Cy) <= 200)) { dupPlans++; continue; }
+                    unique.Add(d);
+                }
+                plans = unique;
             }
 
             // ---- 4. door types by width ------------------------------------------
@@ -484,6 +503,7 @@ namespace RevitMCP.Addin
                 ["swing_arcs"] = arcs.Count,
                 ["hosted_arcs"] = hosted.Count,
                 ["ignored_small_arcs"] = ignoredSmall,
+                ["duplicate_plans_dropped"] = dupPlans,
                 ["doors_planned"] = plans.Count,
                 ["doors_created"] = dryRun ? 0 : doors.Count,
                 ["skipped_existing"] = skipped,

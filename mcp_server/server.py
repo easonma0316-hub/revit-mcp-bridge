@@ -493,6 +493,23 @@ def create_doors_from_cad(link_id: int, layers: list[str], level_id: int,
 
 
 @mcp.tool()
+def snapshot_region(bbox_mm: list[list[float]], pixels: int = 1600,
+                    view_id: int | None = None,
+                    hide_categories: list[str] | None = None) -> dict:
+    """Export a PNG of a rectangular region [[xmin, ymin], [xmax, ymax]] (mm) of
+    a floor plan and return its file path - LOOK at it (open the image) to
+    check what was modelled against the CAD: Revit walls appear filled, CAD
+    lines in their layer colours, doors with swing lines. Uses the active plan
+    view by default (the UI is zoomed to the region and restored afterwards);
+    `view_id` may name another floor plan. `hide_categories` (e.g.
+    ["Furniture", "Text Notes"]) hides clutter for the shot only. Use it after
+    create_walls_from_cad / create_doors_from_cad on the region you built."""
+    return _call("snapshot_region", {"bbox_mm": bbox_mm, "pixels": pixels,
+                                     "view_id": view_id,
+                                     "hide_categories": hide_categories})
+
+
+@mcp.tool()
 def rename_element(element_id: int, new_name: str) -> dict:
     """Rename a Revit element by setting its Name *property* (which
     set_parameter cannot reach): families (ids from list_families), family
