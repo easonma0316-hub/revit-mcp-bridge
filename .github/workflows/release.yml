@@ -22,8 +22,11 @@ jobs:
         with:
           dotnet-version: "8.0.x"
 
-      - name: Build add-in (Release)
+      - name: Build add-in (Release, 2024 + 2026)
         run: dotnet build RevitMCP.Addin/RevitMCP.Addin.csproj -c Release
+
+      - name: Build add-in (Release, 2025)
+        run: dotnet build RevitMCP.Addin/RevitMCP.Addin.csproj -c Release -p:RevitVersion=2025
 
       - name: Package add-in + installer
         shell: pwsh
@@ -32,7 +35,7 @@ jobs:
           #         RevitMCP-addin/install.ps1
           $stage = "dist/RevitMCP-addin"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
-          foreach ($y in 2024, 2026) {
+          foreach ($y in 2024, 2025, 2026) {
             $src = "RevitMCP.Addin/bin/Release/$y"
             if (-not (Test-Path "$src/RevitMCP.Addin.dll")) { throw "Missing build for Revit $y" }
             New-Item -ItemType Directory -Force -Path "$stage/$y" | Out-Null

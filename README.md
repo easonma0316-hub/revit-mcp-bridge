@@ -19,48 +19,69 @@ the API.
   per-request queue, wrapped in structured error codes, with a read-only mode and
   a confirmation gate for destructive actions.
 
-## Architecture
+## Install
 
-Revit hosts add-ins in-process (**.NET Framework 4.8** up to Revit 2024, **.NET 8**
-from Revit 2025), where running the C# MCP SDK alongside the Revit API is
-fragile. So RevitMCP uses the **bridge** pattern:
+You don't need the .NET SDK or to build anything — the add-in ships prebuilt.
+
+**Requirements:** Windows, Revit 2024 / 2025 / 2026, Python 3.10+ (or
+[uv](https://docs.astral.sh/uv/) / [pipx](https://pipx.pypa.io)), and an MCP
+client such as Claude Code.
+
+**1. Install the Revit add-in** — download `RevitMCP-addin.zip` from the
+[latest release](https://github.com/easonma0316-hub/revit-mcp-bridge/releases/latest),
+unzip it, and run the bundled installer from that folder:
+
+```powershell
+.\install.ps1          # auto-detects your installed Revit year(s) and copies the add-in
+```
+
+(The zip holds one build per Revit year — `2024\`, `2025\`, `2026\` — and the
+installer copies the matching one into `%APPDATA%\Autodesk\Revit\Addins\<year>`.
+Pass `-RevitYears 2026` to pick a year explicitly.)
+
+Then start Revit, open a model, and choose **Always Load** at the security prompt.
+The add-in listens on `http://127.0.0.1:8765/` (localhost only). Quick check from
+PowerShell:
+
+```powershell
+Invoke-RestMethod -Uri http://127.0.0.1:8765/ -Method Get     # → status = alive
+```
+
+**2. Connect the MCP server** — no clone or virtualenv needed:
+
+```powershell
+# via uv (recommended)
+claude mcp add revit -- uvx --from git+https://github.com/easonma0316-hub/revit-mcp-bridge revit-mcp-bridge
+
+# or via pipx
+pipx install git+https://github.com/easonma0316-hub/revit-mcp-bridge
+claude mcp add revit -- revit-mcp-bridge
+```
+
+Restart your MCP client and run `/mcp` — you should see `revit` with its tools.
+Other MCP clients (Claude Desktop, Cursor, …) use the same command
+(`uvx --from git+https://github.com/easonma0316-hub/revit-mcp-bridge revit-mcp-bridge`)
+in their MCP config.
+
+**Upgrading:** download the new zip and rerun `install.ps1` (Revit may need a
+restart if it was open); the Python side updates on the next `uvx` run
+(`uvx --refresh …`) or `pipx upgrade revit-mcp-bridge`.
+
+## How it works
 
 ```
-MCP client ──stdio──► mcp_server/server.py (CPython, FastMCP)
-                             │  HTTP POST  {"command","params"}
+MCP client ──stdio──► revit-mcp-bridge (Python, FastMCP)
+                             │  HTTP POST  {"command","params"}   (localhost)
                              ▼
                     RevitMCP.Addin.dll  (HttpListener inside Revit)
-                             │  ExternalEvent.Raise()  +  per-request queue
+                             │  ExternalEvent  +  per-request queue
                              ▼
                     Revit API on the UI thread (Transaction when writing)
 ```
 
-Two Revit hard rules this design satisfies:
-
-1. **API calls must run on Revit's UI thread** — the background HTTP thread can't
-   touch the model, so every request is marshaled via an `ExternalEvent`.
-2. **Model changes need a `Transaction`** — see the write commands in
-   `CommandRouter.cs`.
-
-## Project layout
-
-| Path | Purpose |
-|------|---------|
-| `RevitMCP.Addin/RevitMcpApp.cs` | Add-in entry (`IExternalApplication`); fail-soft startup, port fallback |
-| `RevitMCP.Addin/Config.cs` | Env-var configuration (port, read-only, confirm, timeout) |
-| `RevitMCP.Addin/Log.cs` | Append-only file logger |
-| `RevitMCP.Addin/McpException.cs` | Typed error with a machine-readable code |
-| `RevitMCP.Addin/HttpServer.cs` | Background `HttpListener`; GET health + POST commands |
-| `RevitMCP.Addin/RevitDispatcher.cs` | Marshals to the UI thread, one slot per request |
-| `RevitMCP.Addin/RequestHandler.cs` | `IExternalEventHandler`; drains the request queue |
-| `RevitMCP.Addin/CommandRouter.cs` | Command → Revit API action (**add tools here**) |
-| `RevitMCP.Addin/CommandRouter.Cad.cs` | CAD-link tools: layer stats, geometry export, walls from wall layers |
-| `RevitMCP.Addin/CommandRouter.CadDoors.cs` | Doors from door swing arcs (hosted on the walls above) |
-| `RevitMCP.Addin/CommandRouter.CadColumns.cs` | Columns from rectangles / circles on a column layer |
-| `RevitMCP.Addin/Json.cs` | JSON layer (JavaScriptSerializer on net48, System.Text.Json on net8) |
-| `RevitMCP.Addin/DynamicCompiler.cs` | `execute_code` compiler (CodeDom on net48, Roslyn on net8) |
-| `dev/devcall.ps1` | Dev helper: run a command from a freshly built DLL inside a running Revit 2025+ (no restart) |
-| `mcp_server/server.py` | FastMCP server exposing tools to the MCP client (**add tools here**) |
+Every request is marshaled onto Revit's UI thread and wrapped in a transaction
+when it writes, so the model is never touched from a background thread.
+Details, build instructions and how to add tools: see [DEVELOPMENT.md](DEVELOPMENT.md).
 
 ## Tools
 
@@ -159,14 +180,14 @@ limited to the Revit API).
 environment when registering it:
 
 ```powershell
-claude mcp add revit --env REVIT_MCP_ENABLE_CODE=1 -- <repo>\.venv\Scripts\python.exe <repo>\mcp_server\server.py
+claude mcp add revit --env REVIT_MCP_ENABLE_CODE=1 -- uvx --from git+https://github.com/easonma0316-hub/revit-mcp-bridge revit-mcp-bridge
 ```
 
 **Disable it** by re-adding without the variable (or removing it from your MCP
 config) and reconnecting — the tool then simply doesn't exist for the AI.
 
 Notes:
-- The gate lives in the MCP server (`server.py`); the add-in itself always
+- The gate lives in the Python MCP server; the add-in itself always
   understands the `execute_code` command on its localhost-only port.
 - Code runs inside an auto-committed `Transaction`; an exception rolls the
   model back. It also respects `REVIT_MCP_READONLY`.
@@ -189,134 +210,6 @@ has a matching variable on the Python side.
 | `REVIT_MCP_TIMEOUT` | `65` | *(Python side)* HTTP timeout in seconds. |
 | `REVIT_MCP_ENABLE_CODE` | `0` | *(Python side)* `1` registers the `execute_code` tool (see the warning section above). |
 
-## Install (for users)
-
-If you just want to *use* RevitMCP (not develop it), you don't need the .NET SDK
-or to build anything.
-
-**1. Install the Revit add-in** — download `RevitMCP-addin.zip` from the
-[latest release](https://github.com/easonma0316-hub/revit-mcp-bridge/releases/latest),
-unzip it, and run the bundled installer from that folder:
-
-```powershell
-.\install.ps1          # auto-detects your installed Revit year(s) and copies the add-in
-```
-
-Then start Revit, open a model, and choose **Always Load** at the security prompt.
-
-**2. Connect the MCP server** — no clone or virtualenv needed if you have
-[pipx](https://pipx.pypa.io) or [uv](https://docs.astral.sh/uv/):
-
-```powershell
-# via uv (recommended)
-claude mcp add revit -- uvx --from git+https://github.com/easonma0316-hub/revit-mcp-bridge revit-mcp-bridge
-
-# or via pipx
-pipx install git+https://github.com/easonma0316-hub/revit-mcp-bridge
-claude mcp add revit -- revit-mcp-bridge
-```
-
-Restart your MCP client and run `/mcp` — you should see `revit` with its tools.
-(Once the package is published to PyPI, the `git+` URL becomes just
-`revit-mcp-bridge`.)
-
-Developers building from source should follow the sections below (or `SETUP.md`
-for a full guided walkthrough).
-
-## Build the add-in (from source)
-
-Requires the .NET 8 SDK (it also builds the .NET Framework 4.8 target; on a
-machine without the 4.8 targeting pack install it via Visual Studio's ".NET
-desktop" workload or the standalone "Developer Pack"). The Revit API comes from
-NuGet (`Nice3point.Revit.Api.*`, which repackages the real Revit assemblies), so
-the project builds even on a machine without Revit installed — no `HintPath`
-editing needed.
-
-The add-in is **multi-targeted**, one build per Revit runtime:
-
-| Revit year | Runtime            | Target framework | Extra files in `bin`              |
-|-----------:|--------------------|------------------|-----------------------------------|
-| 2024       | .NET Framework 4.8 | `net48`          | none (single DLL)                 |
-| 2025, 2026 | .NET 8             | `net8.0-windows` | `Microsoft.CodeAnalysis*.dll` (Roslyn, only used by `execute_code`) |
-
-```powershell
-# builds 2024 AND 2026
-dotnet build .\RevitMCP.Addin\RevitMCP.Addin.csproj -c Release
-
-# just one year (2025 uses the same .NET 8 code path against the 2025 API)
-dotnet build .\RevitMCP.Addin\RevitMCP.Addin.csproj -c Release -p:RevitVersion=2026
-dotnet build .\RevitMCP.Addin\RevitMCP.Addin.csproj -c Release -p:RevitVersion=2025
-```
-
-Output: `RevitMCP.Addin\bin\Release\<year>\` — a complete install set (the DLL,
-its dependencies and `RevitMCP.addin`). The Revit API DLLs are compile-only and
-are **not** copied to `bin` — Revit loads its own at runtime.
-
-### Continuous integration
-
-`.github/workflows/build.yml` compiles the add-in for every Revit year (on
-Windows, since both targets are Windows-only) and byte-compiles the Python server
-on every pull request and push to `main`. It's a **compile gate**, not a functional test — it can't run tools
-inside Revit.
-
-## Install the add-in into Revit
-
-The easiest way is the installer, which detects installed Revit years and copies
-the matching build (DLL + dependencies + manifest) for each:
-
-```powershell
-.\install.ps1                    # every installed Revit we have a build for
-.\install.ps1 -RevitYears 2026   # just one
-```
-
-Or by hand — copy **everything** from the year's build folder into Revit's
-add-ins folder (adjust the year to match your Revit):
-
-```powershell
-$dst = "$env:APPDATA\Autodesk\Revit\Addins\2026"
-Copy-Item .\RevitMCP.Addin\bin\Release\2026\*.dll   $dst
-Copy-Item .\RevitMCP.Addin\bin\Release\2026\*.addin $dst
-```
-
-Start Revit and open a model. The listener comes up on `http://127.0.0.1:8765/`.
-Smoke-test it from PowerShell:
-
-```powershell
-# health (no model needed)
-Invoke-RestMethod -Uri http://127.0.0.1:8765/ -Method Get
-
-# a command
-Invoke-RestMethod -Uri http://127.0.0.1:8765/ -Method Post `
-  -ContentType application/json -Body '{"command":"ping"}'
-```
-
-## Set up the Python MCP server
-
-```powershell
-py -3 -m venv .venv
-.\.venv\Scripts\pip install -r .\mcp_server\requirements.txt
-```
-
-## Connect to Claude Code
-
-```powershell
-claude mcp add revit -- <repo>\.venv\Scripts\python.exe <repo>\mcp_server\server.py
-claude mcp list
-```
-
-Restart Claude Code, then `/mcp` should list `revit` with all the tools above.
-
-## Adding a new tool
-
-1. **C#** — add a `case "my_tool":` in `CommandRouter.Route` and a method that does
-   the Revit work. Read tools need no transaction; wrap any model change in a
-   `Transaction` and call `EnsureWritable()` first. Throw `McpException` with a
-   suitable code for expected failures.
-2. **Python** — add an `@mcp.tool()` function in `server.py` that calls
-   `_call("my_tool", {...})`. Write a clear docstring — the LLM reads it.
-
-Read tools reuse the existing `ExternalEvent` marshaling for free.
-
 ## Troubleshooting
 
 - **Client can't reach Revit (`NOT_CONNECTED`)** — is Revit open with a model
@@ -334,3 +227,9 @@ Read tools reuse the existing `ExternalEvent` marshaling for free.
 - Requests are serialized on the UI thread — fine for interactive use.
 - Destructive `delete_elements` prompts in Revit unless `REVIT_MCP_CONFIRM=0`.
 - The listener binds to `127.0.0.1` only, so it is never exposed off the machine.
+
+## Development
+
+Building from source, project layout, adding new tools, CI and releasing are
+covered in [DEVELOPMENT.md](DEVELOPMENT.md); [SETUP.md](SETUP.md) is a
+step-by-step install-and-test playbook you can hand to an AI agent.

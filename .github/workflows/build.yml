@@ -17,7 +17,7 @@ on:
 
 jobs:
   build-addin:
-    name: Build Revit add-in (2024 net48 + 2026 net8)
+    name: Build Revit add-in (2024 net48 + 2025/2026 net8)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,13 +27,16 @@ jobs:
         with:
           dotnet-version: "8.0.x"
 
-      - name: Build add-in (Release, all Revit years)
+      - name: Build add-in (Release, 2024 + 2026)
         run: dotnet build RevitMCP.Addin/RevitMCP.Addin.csproj -c Release
+
+      - name: Build add-in (Release, 2025)
+        run: dotnet build RevitMCP.Addin/RevitMCP.Addin.csproj -c Release -p:RevitVersion=2025
 
       - name: Check outputs
         shell: pwsh
         run: |
-          foreach ($y in 2024, 2026) {
+          foreach ($y in 2024, 2025, 2026) {
             $dll = "RevitMCP.Addin/bin/Release/$y/RevitMCP.Addin.dll"
             if (-not (Test-Path $dll)) { throw "Missing $dll" }
           }
