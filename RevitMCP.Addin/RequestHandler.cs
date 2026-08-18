@@ -36,25 +36,58 @@ namespace RevitMCP.Addin
 
         internal void Enqueue(PendingRequest request) => _queue.Enqueue(request);
 
+        /// <summary>True while an MCP request runs on the UI thread.</summary>
+        internal static bool InRequest { get; private set; }
+
         public void Execute(UIApplication app)
         {
-            // Drain everything currently queued. New arrivals will re-raise the event.
-            while (_queue.TryDequeue(out var request))
+            // Nobody sits at the screen during an MCP request: a warning dialog would
+            // freeze the bridge until someone clicks it away. Swallow warnings raised by
+            // any transaction we run (errors still surface); the user's own edits are
+            // untouched because the handler only acts while InRequest is set.
+            EnsureFailureHook(app);
+            InRequest = true;
+            try
             {
-                try
+                // Drain everything currently queued. New arrivals will re-raise the event.
+                while (_queue.TryDequeue(out var request))
                 {
-                    request.Result = CommandRouter.Route(app, request.Command, request.Params);
-                }
-                catch (Exception ex)
-                {
-                    request.Error = ex;
-                    Log.Error($"Command '{request.Command}' failed", ex);
-                }
-                finally
-                {
-                    request.Done.Set();
+                    try
+                    {
+                        request.Result = CommandRouter.Route(app, request.Command, request.Params);
+                    }
+                    catch (Exception ex)
+                    {
+                        request.Error = ex;
+                        Log.Error($"Command '{request.Command}' failed", ex);
+                    }
+                    finally
+                    {
+                        request.Done.Set();
+                    }
                 }
             }
+            finally { InRequest = false; }
+        }
+
+        private static bool _hooked;
+        private static void EnsureFailureHook(UIApplication app)
+        {
+            if (_hooked) return;
+            _hooked = true;
+            try
+            {
+                app.Application.FailuresProcessing += (s, e) =>
+                {
+                    if (!InRequest) return;
+                    var fa = e.GetFailuresAccessor();
+                    bool any = false;
+                    foreach (var f in fa.GetFailureMessages())
+                        if (f.GetSeverity() == Autodesk.Revit.DB.FailureSeverity.Warning) { fa.DeleteWarning(f); any = true; }
+                    if (any) e.SetProcessingResult(Autodesk.Revit.DB.FailureProcessingResult.Continue);
+                };
+            }
+            catch (Exception ex) { Log.Error("FailuresProcessing hook failed", ex); }
         }
 
         public string GetName() => "RevitMCP.RequestHandler";

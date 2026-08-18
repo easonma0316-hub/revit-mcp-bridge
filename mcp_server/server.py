@@ -392,11 +392,13 @@ def create_walls_from_cad(link_id: int, layers: list[str], level_id: int,
                           bbox_mm: list[list[float]] | None = None,
                           dry_run: bool = True,
                           thicknesses_mm: list[float] | None = None,
+                          auto_thicknesses: bool = False,
                           tolerance_mm: float = 5.0,
                           min_length_mm: float = 300.0,
                           merge_gap_mm: float = 300.0,
                           type_map: list[dict] | None = None,
                           door_layers: list[str] | None = None,
+                          window_layers: list[str] | None = None,
                           max_opening_mm: float = 3000.0,
                           snap_ends: bool = True,
                           create_missing_types: bool = True,
@@ -428,8 +430,14 @@ def create_walls_from_cad(link_id: int, layers: list[str], level_id: int,
     centerline of the wall they run into (`snap_ends`) so Revit joins them.
     Openings: pass the layer(s) holding door swing arcs as `door_layers`; a gap
     (up to `max_opening_mm`) that contains a swing arc is bridged - the wall
-    runs through and the door cuts it later. Gaps holding only lines/polylines
-    (windows) or nothing are LEFT OPEN in the wall, as are gaps > merge_gap_mm.
+    runs through and the door cuts it later. Likewise `window_layers`: a gap
+    filled by window lines drawn along the wall (face / glass lines) is bridged
+    so create_windows_from_cad can host a window there. Gaps with neither (or
+    without those params) are LEFT OPEN in the wall, as are gaps > merge_gap_mm.
+    `auto_thicknesses=True` learns the wall thicknesses from the drawing
+    (histogram of adjacent parallel-face spacings, peaks with >= 3 pairs; the
+    result is reported as `thicknesses_mm` / `thickness_peaks`) instead of the
+    default metric list - use it for imperial or unfamiliar drawings.
     Types: an existing basic wall type within `tolerance_mm` of the thickness
     is reused; otherwise (create_missing_types) the nearest type (or
     `base_type_id`) is duplicated with its core layer resized, named after the
@@ -449,9 +457,11 @@ def create_walls_from_cad(link_id: int, layers: list[str], level_id: int,
     return _call("create_walls_from_cad", {
         "link_id": link_id, "layers": layers, "level_id": level_id,
         "height_mm": height_mm, "bbox_mm": bbox_mm, "dry_run": dry_run,
-        "thicknesses_mm": thicknesses_mm, "tolerance_mm": tolerance_mm,
+        "thicknesses_mm": thicknesses_mm, "auto_thicknesses": auto_thicknesses,
+        "tolerance_mm": tolerance_mm,
         "min_length_mm": min_length_mm, "merge_gap_mm": merge_gap_mm,
         "type_map": type_map, "door_layers": door_layers,
+        "window_layers": window_layers,
         "max_opening_mm": max_opening_mm, "snap_ends": snap_ends,
         "create_missing_types": create_missing_types, "ai_tag": ai_tag,
         "base_type_id": base_type_id,
@@ -555,6 +565,93 @@ def create_columns_from_cad(link_id: int, layers: list[str], level_id: int,
 
 
 @mcp.tool()
+def create_windows_from_cad(link_id: int, layers: list[str], level_id: int,
+                            bbox_mm: list[list[float]] | None = None,
+                            dry_run: bool = True,
+                            sill_height_mm: float = 900.0,
+                            host_tolerance_mm: float = 60.0,
+                            min_width_mm: float = 300.0,
+                            max_width_mm: float = 6000.0,
+                            join_gap_mm: float = 100.0,
+                            family: str | None = None,
+                            type_map: list[dict] | None = None,
+                            width_step_mm: float = 100.0,
+                            width_tolerance_mm: float = 50.0,
+                            create_missing_types: bool = True,
+                            ai_tag: str = "_AI",
+                            skip_existing: bool = True) -> dict:
+    """Place hosted windows from the window symbol lines on CAD layer(s) - run
+    AFTER create_walls_from_cad (called with the same `window_layers`, so the
+    walls run through the window openings). A plan window is a bundle of
+    lines drawn ALONG the wall across the opening (wall-face cut lines, glass /
+    frame lines) plus short jamb lines: every along-wall segment inside a
+    wall's corridor (half thickness + `host_tolerance_mm`) is assigned to that
+    wall, touching segments (gap <= `join_gap_mm`) merge into one opening; its
+    extent is the width, its middle the centre. Width in
+    [`min_width_mm`, `max_width_mm`]. Type = `type_map` [{"width_mm",
+    "type_id"}] if given, else a loaded window type of matching width
+    (families filtered by `family` substring, default hints fixed/casement/
+    sliding); a type within `width_tolerance_mm` is reused, else the width is
+    rounded to `width_step_mm` and ONE type per grid value is duplicated from
+    the nearest type (name by its convention + `ai_tag`, Type Comments say
+    AI-made). Sill = `sill_height_mm` above the level. Windows within 200 mm
+    of an existing window are skipped. dry_run=True first: lists planned
+    windows (width/centre/host/type), unhosted segments and warnings."""
+    return _call("create_windows_from_cad", {
+        "link_id": link_id, "layers": layers, "level_id": level_id,
+        "bbox_mm": bbox_mm, "dry_run": dry_run, "sill_height_mm": sill_height_mm,
+        "host_tolerance_mm": host_tolerance_mm, "min_width_mm": min_width_mm,
+        "max_width_mm": max_width_mm, "join_gap_mm": join_gap_mm,
+        "family": family, "type_map": type_map, "width_step_mm": width_step_mm,
+        "width_tolerance_mm": width_tolerance_mm,
+        "create_missing_types": create_missing_types, "ai_tag": ai_tag,
+        "skip_existing": skip_existing},
+        timeout=None if dry_run else BATCH_TIMEOUT)
+
+
+@mcp.tool()
+def create_stairs_from_cad(link_id: int, layers: list[str], level_id: int,
+                           top_level_id: int | None = None,
+                           height_mm: float | None = None,
+                           bbox_mm: list[list[float]] | None = None,
+                           dry_run: bool = True,
+                           arrow_layers: list[str] | None = None,
+                           type_id: int | None = None,
+                           tread_min_mm: float = 220.0,
+                           tread_max_mm: float = 420.0,
+                           width_min_mm: float = 600.0,
+                           width_max_mm: float = 3500.0,
+                           min_treads: int = 3,
+                           landing_max_mm: float = 3000.0,
+                           skip_existing: bool = True,
+                           ai_tag: str = "_AI") -> dict:
+    """Build stairs from the tread lines on CAD stair layer(s): a run is a comb
+    of >= `min_treads` parallel, equal-length (= run width), equally spaced
+    (= tread depth, within tread_min/max) lines; runs whose ends lie within
+    `landing_max_mm` of each other are chained into one stair (U / L shapes get
+    an automatic landing). Base = `level_id`, top = `top_level_id` (default:
+    the next level up) or `height_mm`; risers = tread lines counted, a stair
+    type "<base type> T<tread> R<riser>_AI" is duplicated from `type_id` (or the
+    first stair type) with matching min tread / max riser. Direction (bottom ->
+    top): the run end nearest a path arrowhead (small closed triangle on
+    `arrow_layers` or the stair layers) is the top; without one the order is a
+    guess and reported. Spiral / winder stairs are not handled. Stairs whose
+    footprint overlaps an existing stair on the level are skipped. Needs its
+    own StairsEditScope, so it cannot run inside execute_code's transaction.
+    dry_run=True first: lists planned stairs (runs, risers, riser height,
+    direction source, bbox)."""
+    return _call("create_stairs_from_cad", {
+        "link_id": link_id, "layers": layers, "level_id": level_id,
+        "top_level_id": top_level_id, "height_mm": height_mm, "bbox_mm": bbox_mm,
+        "dry_run": dry_run, "arrow_layers": arrow_layers, "type_id": type_id,
+        "tread_min_mm": tread_min_mm, "tread_max_mm": tread_max_mm,
+        "width_min_mm": width_min_mm, "width_max_mm": width_max_mm,
+        "min_treads": min_treads, "landing_max_mm": landing_max_mm,
+        "skip_existing": skip_existing, "ai_tag": ai_tag},
+        timeout=None if dry_run else BATCH_TIMEOUT)
+
+
+@mcp.tool()
 def snapshot_region(bbox_mm: list[list[float]], pixels: int = 1600,
                     view_id: int | None = None,
                     hide_categories: list[str] | None = None,
@@ -575,6 +672,96 @@ def snapshot_region(bbox_mm: list[list[float]], pixels: int = 1600,
                                      "hide_categories": hide_categories,
                                      "hide_links": hide_links,
                                      "highlight": highlight})
+
+
+@mcp.tool()
+def open_document(path: str) -> dict:
+    """Open a .rvt file (absolute path) and activate it as the active document
+    in the Revit UI. Returns title, path, and the name of the resulting active
+    view."""
+    return _call("open_document", {"path": path})
+
+
+@mcp.tool()
+def create_floor_plan_view(level_id: int, name: str | None = None,
+                           ceiling: bool = False, activate: bool = False,
+                           scale: int = 0, detail_level: str | None = None) -> dict:
+    """Create a floor plan view (or, with `ceiling=True`, a ceiling plan) on
+    `level_id`. `name` overrides the auto-assigned view name (must be unique).
+    `scale` is the drawing scale denominator (e.g. 100 for 1:100); 0 keeps the
+    default. `detail_level` is one of coarse|medium|fine (omit to keep the
+    default). `activate=True` switches the Revit UI to the new view. Runs in a
+    transaction; returns the new view's id/name/viewType/level."""
+    return _call("create_floor_plan_view", {
+        "level_id": level_id, "name": name, "ceiling": ceiling,
+        "activate": activate, "scale": scale, "detail_level": detail_level})
+
+
+@mcp.tool()
+def link_cad(path: str, view_id: int | None = None, this_view_only: bool = True,
+            placement: str = "origin", unit: str = "mm", colors: str = "preserve",
+            link: bool = True, pin: bool = True, orient_to_view: bool = False,
+            visible_layers_only: bool = False) -> dict:
+    """Link (or, with `link=False`, import) a DWG file into the model onto a
+    view. `view_id` defaults to the active view, which must be a plan, section,
+    elevation, 3D, detail, or drafting view. `placement` is origin|shared|
+    center|site; `unit` is mm|cm|m|ft|in|auto (auto uses the DWG's own units);
+    `colors` is preserve|bw|invert. `pin=True` (default) pins the link so it
+    can't be moved by accident. Returns the link `id` - use it with
+    list_cad_links / get_cad_geometry / create_walls_from_cad / etc. - plus the
+    target view and bbox_mm. Runs in a transaction; can take a while for large
+    DWGs."""
+    return _call("link_cad", {
+        "path": path, "view_id": view_id, "this_view_only": this_view_only,
+        "placement": placement, "unit": unit, "colors": colors, "link": link,
+        "pin": pin, "orient_to_view": orient_to_view,
+        "visible_layers_only": visible_layers_only}, timeout=BATCH_TIMEOUT)
+
+
+@mcp.tool()
+def export_dwg(folder: str, view_ids: list[int] | None = None,
+              view_names: list[str] | None = None, prefix: str = "",
+              document: str | None = None, shared_coords: bool = False,
+              merged_views: bool = True, export_setup: str | None = None) -> dict:
+    """Export views to DWG files (millimeters, R2018) in `folder`, one file per
+    view named `<prefix><view name>.dwg`. Give `view_ids` and/or `view_names`
+    (by exact name); if both are omitted, exports the active view (only valid
+    when `document` is the active document). `document` is the title of any
+    currently OPEN document (default: the active one) - no need to activate it
+    first. `export_setup` names a predefined DWG export setup in the document
+    (error lists the available names if not found) - overrides shared_coords/
+    merged_views. Can take a while for many/large views."""
+    return _call("export_dwg", {
+        "folder": folder, "view_ids": view_ids, "view_names": view_names,
+        "prefix": prefix, "document": document, "shared_coords": shared_coords,
+        "merged_views": merged_views, "export_setup": export_setup},
+        timeout=BATCH_TIMEOUT)
+
+
+@mcp.tool()
+def dump_model(path: str | None = None, categories: list[str] | None = None,
+               level_id: int | None = None, level_name: str | None = None,
+               bbox_mm: list[list[float]] | None = None,
+               include_links: bool = True, document: str | None = None) -> dict:
+    """Dump the model's architectural elements (walls, doors, windows, columns,
+    stairs, floors, grids) to JSON, in millimeters, host-document coordinates.
+    Elements from loaded Revit links are included too (`include_links`), each
+    tagged with `source` = the link instance name; use this to compare a
+    CAD-rebuilt model against a reference model linked in (or dump the
+    reference document directly via `document` = its title among currently
+    open documents - no need to activate it). Filter with `categories` (subset
+    of walls/doors/windows/columns/stairs/floors/grids), `level_id`/
+    `level_name`, and/or `bbox_mm` = [[xmin, ymin], [xmax, ymax]].
+    If `path` is given (recommended for whole models - the payload can be
+    large), the JSON is written to that file and this returns only
+    counts/levels/sources; otherwise the full JSON is returned inline. Pair two
+    dumps (ground truth vs. rebuilt) with dev/compare_models.py. Can take a
+    while for large models."""
+    return _call("dump_model", {
+        "path": path, "categories": categories, "level_id": level_id,
+        "level_name": level_name, "bbox_mm": bbox_mm,
+        "include_links": include_links, "document": document},
+        timeout=BATCH_TIMEOUT)
 
 
 @mcp.tool()
@@ -607,7 +794,7 @@ def save_family_as(path: str, overwrite: bool = False) -> dict:
 
 if ENABLE_CODE:
     @mcp.tool()
-    def execute_code(code: str) -> dict:
+    def execute_code(code: str, transaction: bool = True) -> dict:
         """Run raw C# against the open Revit model (only for what no other tool
         can do). `code` is the BODY of a method with `app` (UIApplication),
         `uidoc` (UIDocument) and `doc` (Document) in scope and must end with a
@@ -616,6 +803,9 @@ if ENABLE_CODE:
         Rules:
         - Already wrapped in a committed Transaction — do NOT open your own
           (SubTransactions are fine). An exception rolls everything back.
+          `transaction=False` runs the code with NO transaction (for read-only
+          code, or calls Revit refuses inside one such as
+          OpenAndActivateDocument / Export); then open your own if you modify.
         - Revit 2024 (.NET Framework, CodeDom): C# 5 syntax only (no `$"..."`
           interpolation, no `?.`). Revit 2025+ (.NET 8, Roslyn): modern C#.
           When unsure which Revit is running (see `ping`), stick to C# 5.
@@ -623,7 +813,7 @@ if ENABLE_CODE:
           Autodesk.Revit.DB(+.Architecture/.Structure), Autodesk.Revit.UI.
         - Return values are JSON-ified (Element -> summary, ElementId -> id,
           XYZ -> {x, y, z} mm, other types -> ToString())."""
-        return _call("execute_code", {"code": code})
+        return _call("execute_code", {"code": code, "transaction": transaction})
 
 
 def main() -> None:

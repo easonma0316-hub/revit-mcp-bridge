@@ -366,6 +366,14 @@ namespace RevitMCP.Addin
             var heightMm = GetDouble(p, "height_mm");
             var bbox = GetOptBboxMm(p);
             var thicknesses = GetDoubleListOr(p, "thicknesses_mm", DefaultThicknessesMm);
+            bool autoThick = GetBoolOr(p, "auto_thicknesses", false);
+            bool extendSingleFace = GetBoolOr(p, "extend_single_face", true);
+            double minExtend = GetDoubleOr(p, "min_extend_mm", 150.0);
+            double maxExtend = GetDoubleOr(p, "max_extend_mm", 6000.0);
+            int singleFaceExt = 0;
+            double autoMaxThick = GetDoubleOr(p, "auto_max_thickness_mm", 600.0);
+            double autoMinThick = GetDoubleOr(p, "auto_min_thickness_mm", 50.0);   // thinner spacings are finish / banding lines
+            var thicknessPeaks = new List<Dictionary<string, object>>();
             double tol = GetDoubleOr(p, "tolerance_mm", 5.0);
             double angleTol = GetDoubleOr(p, "angle_tolerance_deg", 0.5);
             double minLen = GetDoubleOr(p, "min_length_mm", 300.0);
@@ -431,12 +439,61 @@ namespace RevitMCP.Addin
                     });
                 }
             }
+            // Window layers: a straight window-symbol segment (window drawn as lines
+            // across the opening: face lines / glass lines) that runs ALONG the wall
+            // inside its corridor and fills most of a gap marks a window opening; the
+            // wall then runs through so create_windows_from_cad can host a window in
+            // it. Without window_layers, window gaps stay open (old policy).
+            var windowLayers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (p.ContainsKey("window_layers") && p["window_layers"] is IEnumerable wl0 && !(p["window_layers"] is string))
+                foreach (var item in wl0) if (item != null) windowLayers.Add(Convert.ToString(item));
+            var winSegs = new List<double[]>(); // x1, y1, x2, y2
+            if (windowLayers.Count > 0)
+            {
+                void AddWin(XYZ a, XYZ b)
+                {
+                    double ax = FtToMm(a.X), ay = FtToMm(a.Y), bx = FtToMm(b.X), by = FtToMm(b.Y);
+                    var l2 = (bx - ax) * (bx - ax) + (by - ay) * (by - ay);
+                    if (l2 >= 200 * 200) winSegs.Add(new[] { ax, ay, bx, by });
+                }
+                foreach (var prim in EnumerateCad(doc, li))
+                {
+                    if (!windowLayers.Contains(prim.Layer)) continue;
+                    if (prim.Geo is Line wln) AddWin(wln.GetEndPoint(0), wln.GetEndPoint(1));
+                    else if (prim.Geo is PolyLine wpl)
+                    {
+                        var pts = wpl.GetCoordinates();
+                        for (int i = 1; i < pts.Count; i++) AddWin(pts[i - 1], pts[i]);
+                    }
+                }
+            }
+            bool WindowBetween(WallPiece w, double ta, double tb)
+            {
+                if (winSegs.Count == 0) return false;
+                var lo = Math.Min(ta, tb); var hi = Math.Max(ta, tb);
+                var gapLen = hi - lo;
+                var half = w.Thickness / 2 + 60;
+                foreach (var sgm in winSegs)
+                {
+                    var dx = sgm[2] - sgm[0]; var dy = sgm[3] - sgm[1]; var len = Math.Sqrt(dx * dx + dy * dy);
+                    if (Math.Abs((dx * w.Dx + dy * w.Dy) / len) < 0.97) continue;           // along the wall
+                    if (Math.Abs(w.Nx * sgm[0] + w.Ny * sgm[1] - w.Offset) > half) continue;  // inside its corridor
+                    if (Math.Abs(w.Nx * sgm[2] + w.Ny * sgm[3] - w.Offset) > half) continue;
+                    var s1 = w.Dx * sgm[0] + w.Dy * sgm[1]; var s2 = w.Dx * sgm[2] + w.Dy * sgm[3];
+                    var slo = Math.Min(s1, s2); var shi = Math.Max(s1, s2);
+                    if (slo < lo - 150 || shi > hi + 150) continue;                          // within the gap
+                    if (shi - slo < 0.5 * gapLen) continue;                                  // and filling most of it
+                    return true;
+                }
+                return false;
+            }
             // Does a door that BELONGS TO wall w sit in the gap ta..tb? Belonging means:
             // hinge and latch (the arc end on the wall) both lie in w's corridor, the
             // closed leaf (hinge -> latch) runs along w, and both are inside the gap.
             // A door of a crossing/nearby wall must not bridge this wall's gap.
             bool OpeningBetween(WallPiece w, double ta, double tb)
             {
+                if (WindowBetween(w, ta, tb)) return true;
                 if (doorArcs.Count == 0) return false;
                 var lo = Math.Min(ta, tb) - 150; var hi = Math.Max(ta, tb) + 150;
                 var half = w.Thickness / 2 + 60; // hinge/latch may sit on a face or the centreline
@@ -528,6 +585,96 @@ namespace RevitMCP.Addin
                 }
             }
 
+            // ---- 2a. optional: learn the wall thicknesses from the drawing -----
+            // Histogram of the distances between overlapping parallel faces (1 mm
+            // bins, weighted by overlap length); peaks with >= 3 pairs become the
+            // thickness list. Saves guessing imperial / unusual sizes.
+            if (autoThick)
+            {
+                var weight = new Dictionary<int, double>();
+                var count = new Dictionary<int, int>();
+                var sameSrc = new Dictionary<int, int>();   // pairs whose faces belong to one polyline outline
+                foreach (var g in groups)
+                {
+                    if (g.Count < 2) continue;
+                    var rs = g.OrderBy(x => x.Angle).ElementAt(g.Count / 2);
+                    var framed = g.Select(sg =>
+                    {
+                        var off = rs.Nx * sg.X1 + rs.Ny * sg.Y1;
+                        var t1 = rs.Dx * sg.X1 + rs.Dy * sg.Y1; var t2 = rs.Dx * sg.X2 + rs.Dy * sg.Y2;
+                        return new { off, lo = Math.Min(t1, t2), hi = Math.Max(t1, t2), src = sg.Source };
+                    }).OrderBy(x => x.off).ToList();
+                    for (int i = 0; i < framed.Count; i++)
+                        for (int j = i + 1; j < framed.Count; j++)
+                        {
+                            var dc = framed[j].off - framed[i].off;
+                            if (dc > autoMaxThick) break;
+                            if (dc < autoMinThick) continue;
+                            var lo = Math.Max(framed[i].lo, framed[j].lo);
+                            var hi = Math.Min(framed[i].hi, framed[j].hi);
+                            if (hi - lo < minLen) continue;
+                            // adjacent faces only: nothing parallel in between over this range
+                            bool blocked = false;
+                            for (int k = i + 1; k < j && !blocked; k++)
+                            {
+                                if (framed[k].off - framed[i].off < 30 || framed[j].off - framed[k].off < 30) continue;
+                                var ovk = Math.Min(hi, framed[k].hi) - Math.Max(lo, framed[k].lo);
+                                if (ovk > 0.3 * (hi - lo)) blocked = true;
+                            }
+                            if (blocked) continue;
+                            int bin = (int)Math.Round(dc);
+                            weight[bin] = (weight.TryGetValue(bin, out var w0) ? w0 : 0) + (hi - lo);
+                            count[bin] = (count.TryGetValue(bin, out var c0) ? c0 : 0) + 1;
+                            if (framed[i].src == framed[j].src)
+                                sameSrc[bin] = (sameSrc.TryGetValue(bin, out var s0) ? s0 : 0) + 1;
+                        }
+                }
+                var detected = new List<double>();
+                var remaining = new HashSet<int>(weight.Keys);
+                double maxPeak = 0;
+                var peaks = new List<(double tk, int csum, int ssum, double wsum)>();
+                foreach (var bin in weight.Keys.OrderByDescending(b => weight[b]).ToList())
+                {
+                    if (!remaining.Contains(bin)) continue;
+                    // merge neighbouring bins within tol into this peak (weighted mean)
+                    var members = remaining.Where(b => Math.Abs(b - bin) <= tol).ToList();
+                    double wsum = members.Sum(b => weight[b]);
+                    int csum = members.Sum(b => count[b]);
+                    int ssum = members.Sum(b => sameSrc.TryGetValue(b, out var sv) ? sv : 0);
+                    double centre = members.Sum(b => b * weight[b]) / wsum;
+                    foreach (var b in members) remaining.Remove(b);
+                    maxPeak = Math.Max(maxPeak, wsum);
+                    peaks.Add((Math.Round(centre), csum, ssum, wsum));
+                }
+                // A real thickness repeats: >= 3 pairs and either two of them are the two
+                // edges of one polyline outline, or the peak carries a decent share of the
+                // strongest one. Corridor widths / column sides / soffit lines fail this.
+                double minShare = GetDoubleOr(p, "auto_min_share", 0.05);
+                foreach (var pk in peaks.OrderByDescending(x => x.wsum))
+                {
+                    bool ok = pk.csum >= 3 && (pk.ssum >= 2 || pk.wsum >= minShare * maxPeak);
+                    if (!ok) continue;
+                    // peaks are already >= tol apart (bins within tol were merged); real
+                    // thicknesses can sit close together (298.5 vs 304.8 mm) so keep both
+                    if (detected.Any(d => Math.Abs(d - pk.tk) <= tol)) continue;
+                    detected.Add(pk.tk);
+                    thicknessPeaks.Add(new Dictionary<string, object>
+                    {
+                        ["thickness_mm"] = pk.tk, ["pairs"] = pk.csum, ["same_outline_pairs"] = pk.ssum, ["overlap_m"] = Math.Round(pk.wsum / 1000, 1)
+                    });
+                }
+                if (detected.Count > 0)
+                {
+                    // explicit thicknesses_mm (if any) are kept alongside the detected ones
+                    var given = p.ContainsKey("thicknesses_mm") && p["thicknesses_mm"] != null ? thicknesses : new List<double>();
+                    foreach (var g0 in given) if (!detected.Any(d => Math.Abs(d - g0) <= tol)) detected.Add(g0);
+                    thicknesses = detected.OrderBy(d => d).ToList();
+                    maxT = thicknesses.Max() + tol;
+                }
+                else
+                    warnings.Add("auto_thicknesses: no repeated face spacing found; using the default thickness list.");
+            }
+
             foreach (var g in groups)
             {
                 if (g.Count < 2) continue;
@@ -583,9 +730,12 @@ namespace RevitMCP.Addin
                         var dc = b.Offset - a.Offset;
                         if (dc > maxT) break;
                         if (dc < thicknesses.Min() - tol) continue;
-                        double thick = -1;
+                        double thick = -1, thickErr = double.MaxValue;
                         foreach (var t in thicknesses)
-                            if (Math.Abs(dc - t) <= tol) { thick = t; break; }
+                        {
+                            var err = Math.Abs(dc - t);
+                            if (err <= tol && err < thickErr) { thick = t; thickErr = err; }
+                        }
                         if (thick < 0) continue;
                         var lo = Math.Max(a.T1, b.T1);
                         var hi = Math.Min(a.T2, b.T2);
@@ -641,6 +791,7 @@ namespace RevitMCP.Addin
                 // Faces of one polyline outline belong together: accept those first, then
                 // cross-entity pairs only where at least one face is still unclaimed
                 // (kills the phantom "wall" between two back-to-back outlines).
+                var accepted = new List<PairCandidate>();
                 foreach (var c in candidates.OrderByDescending(c => c.SameSource).ThenByDescending(c => c.Hi - c.Lo))
                 {
                     if (suppressed.Contains(c)) continue;
@@ -651,12 +802,72 @@ namespace RevitMCP.Addin
                         c.B.Claims.Add(new[] { c.Lo, c.Hi });
                     }
                     c.A.Paired = c.B.Paired = true;
+                    accepted.Add(c);
+                }
+
+                // Single-face continuation (T-junctions, faces hidden behind fixtures):
+                // when one face of a pair runs on past the pair's end while the other
+                // face stops (a crossing wall / a drawn-over stretch), the wall keeps
+                // going along the continuing face - provided that stretch of the face is
+                // not part of another wall and nothing sits inside the corridor there.
+                if (extendSingleFace)
+                {
+                    var byFace = new Dictionary<Seg, List<PairCandidate>>();
+                    foreach (var c in accepted)
+                    {
+                        if (!byFace.TryGetValue(c.A, out var la)) byFace[c.A] = la = new List<PairCandidate>();
+                        la.Add(c);
+                        if (!byFace.TryGetValue(c.B, out var lb)) byFace[c.B] = lb = new List<PairCandidate>();
+                        lb.Add(c);
+                    }
+                    double minFace2 = thicknesses.Min() - tol;
+                    bool FaceFree(Seg f, double lo, double hi, PairCandidate self)
+                    {
+                        foreach (var q in byFace[f])
+                            if (q != self && Math.Min(q.Hi, hi) - Math.Max(q.Lo, lo) > tol) return false;
+                        return true;
+                    }
+                    bool CorridorClear(PairCandidate c, double lo, double hi)
+                    {
+                        double oLo = Math.Min(c.A.Offset, c.B.Offset) + minFace2, oHi = Math.Max(c.A.Offset, c.B.Offset) - minFace2;
+                        if (oHi <= oLo) return true;
+                        foreach (var sgm in sorted)
+                        {
+                            if (sgm == c.A || sgm == c.B) continue;
+                            if (sgm.Offset < oLo || sgm.Offset > oHi) continue;
+                            if (Math.Min(sgm.T2, hi) - Math.Max(sgm.T1, lo) > tol) return false;
+                        }
+                        return true;
+                    }
+                    foreach (var c in accepted)
+                    {
+                        // towards +T
+                        {
+                            double aEnd = c.A.T2, bEnd = c.B.T2;
+                            Seg runner = null; double stop = c.Hi;
+                            if (aEnd > c.Hi + minExtend && bEnd <= c.Hi + tol) { runner = c.A; stop = aEnd; }
+                            else if (bEnd > c.Hi + minExtend && aEnd <= c.Hi + tol) { runner = c.B; stop = bEnd; }
+                            if (runner != null && stop - c.Hi <= maxExtend && FaceFree(runner, c.Hi, stop, c) && CorridorClear(c, c.Hi, stop))
+                            { c.Hi = stop; singleFaceExt++; }
+                        }
+                        // towards -T
+                        {
+                            double aEnd = c.A.T1, bEnd = c.B.T1;
+                            Seg runner = null; double stop = c.Lo;
+                            if (aEnd < c.Lo - minExtend && bEnd >= c.Lo - tol) { runner = c.A; stop = aEnd; }
+                            else if (bEnd < c.Lo - minExtend && aEnd >= c.Lo - tol) { runner = c.B; stop = bEnd; }
+                            if (runner != null && c.Lo - stop <= maxExtend && FaceFree(runner, stop, c.Lo, c) && CorridorClear(c, stop, c.Lo))
+                            { c.Lo = stop; singleFaceExt++; }
+                        }
+                    }
+                }
+
+                foreach (var c in accepted)
                     pieces.Add(new WallPiece
                     {
                         Dx = refSeg.Dx, Dy = refSeg.Dy, Nx = refSeg.Nx, Ny = refSeg.Ny,
                         Offset = (c.A.Offset + c.B.Offset) / 2.0, T1 = c.Lo, T2 = c.Hi, Thickness = c.Thickness
                     });
-                }
             }
             var unpairedSegs = segs.Where(s => !s.Paired && Math.Sqrt((s.X2 - s.X1) * (s.X2 - s.X1) + (s.Y2 - s.Y1) * (s.Y2 - s.Y1)) >= minLen).ToList();
             int unpaired = unpairedSegs.Count;
@@ -1031,7 +1242,16 @@ namespace RevitMCP.Addin
                     }
                     else if (createTypes && !dryRun)
                     {
-                        var src = baseTypeId.HasValue ? doc.GetElement(new ElementId(baseTypeId.Value)) as WallType ?? nearest : nearest;
+                        // Only types with a plain layer stack can have a layer resized
+                        // (vertically compound types - plinths, split regions - throw), so
+                        // derive from the nearest SIMPLE type when possible.
+                        bool Simple(WallType wt)
+                        {
+                            try { var c0 = wt.GetCompoundStructure(); return c0 != null && !c0.IsVerticallyCompound; }
+                            catch { return false; }
+                        }
+                        var nearestSimple = basicTypes.Where(Simple).OrderBy(t0 => Math.Abs(FtToMm(t0.Width) - thick)).FirstOrDefault() ?? nearest;
+                        var src = baseTypeId.HasValue ? doc.GetElement(new ElementId(baseTypeId.Value)) as WallType ?? nearestSimple : nearestSimple;
                         var name = DeriveTypeName(src.Name, FtToMm(src.Width), thick, aiTag);
                         var existing = basicTypes.FirstOrDefault(t => t.Name == name);
                         if (existing != null) chosen = existing;
@@ -1187,8 +1407,11 @@ namespace RevitMCP.Addin
                     ["lines"] = lineCount, ["polylines"] = polylineCount, ["arcs"] = arcCount,
                     ["other_skipped"] = otherCount, ["segments"] = segs.Count
                 },
+                ["thicknesses_mm"] = thicknesses.OrderBy(t => t).ToList(),
+                ["thickness_peaks"] = autoThick ? thicknessPeaks : null,
                 ["pairs"] = pieces.Count,
                 ["pattern_segments_excluded"] = patternSegs,
+                ["single_face_extensions"] = singleFaceExt,
                 ["centreline_pairs_suppressed"] = midlinePairs,
                 ["unpaired_segments"] = unpaired,
                 ["unpaired_examples"] = GetBoolOr(p, "report_unpaired", false)

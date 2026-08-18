@@ -23,6 +23,8 @@
 param(
     [Parameter(Mandatory)][string]$Command,
     [string]$ParamsJson = '{}',
+    [string]$Document = '',        # refuse to run if this is not the active document (title or path)
+    [switch]$NoTransaction,        # run outside execute_code's transaction (needs add-in >= 2026-08-18; e.g. open_document)
     [int]$RevitYear = 2026,
     [string]$Url = 'http://127.0.0.1:8765/',
     [int]$TimeoutSec = 900
@@ -31,6 +33,11 @@ param(
 $repo = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $dll = Join-Path $repo "RevitMCP.Addin\bin\Release\$RevitYear\RevitMCP.Addin.dll"
 if (-not (Test-Path $dll)) { throw "Build first: $dll not found." }
+if ($Document) {
+    $pobj = $ParamsJson | ConvertFrom-Json
+    $pobj | Add-Member -NotePropertyName expect_document -NotePropertyValue $Document -Force
+    $ParamsJson = $pobj | ConvertTo-Json -Depth 20 -Compress
+}
 $escaped = $ParamsJson.Replace('"', '""')
 $code = @"
 var bytes = System.IO.File.ReadAllBytes(@"$dll");
@@ -47,7 +54,9 @@ catch (System.Reflection.TargetInvocationException ex) { throw ex.InnerException
 var ser = jsonT.GetMethod("Serialize", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public);
 return (string)ser.Invoke(null, new object[] { result });
 "@
-$body = @{ command = "execute_code"; params = @{ code = $code }; timeout_ms = $TimeoutSec * 1000 } | ConvertTo-Json -Depth 5
+$params = @{ code = $code }
+if ($NoTransaction) { $params.transaction = $false }
+$body = @{ command = "execute_code"; params = $params; timeout_ms = $TimeoutSec * 1000 } | ConvertTo-Json -Depth 5
 # Send explicit UTF-8 bytes: PowerShell 5.1 would otherwise encode non-ASCII (e.g. Chinese layer names) in the ANSI code page.
 $bytes = [Text.Encoding]::UTF8.GetBytes($body)
 $r = Invoke-RestMethod $Url -Method Post -Body $bytes -ContentType "application/json; charset=utf-8" -TimeoutSec ($TimeoutSec + 5)

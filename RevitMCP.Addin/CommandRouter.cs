@@ -35,6 +35,20 @@ namespace RevitMCP.Addin
             p = p ?? new Dictionary<string, object>();
             var uidoc = app.ActiveUIDocument;
 
+            // Safety net for multi-document sessions: a caller that knows which model
+            // it is working on can pass expect_document (title or path); if the user
+            // has meanwhile switched to another document the command is refused
+            // instead of silently modifying the wrong model.
+            var expect = GetOptString(p, "expect_document");
+            if (!string.IsNullOrEmpty(expect) && command != "ping" && command != "open_document")
+            {
+                var d = uidoc?.Document;
+                if (d == null || !(string.Equals(d.Title, expect, StringComparison.OrdinalIgnoreCase) ||
+                                   string.Equals(d.PathName, expect, StringComparison.OrdinalIgnoreCase)))
+                    throw new McpException(McpException.BadRequest,
+                        $"Active document is '{d?.Title ?? "(none)"}', not '{expect}' - switch to it in Revit (or use open_document) and retry.");
+            }
+
             switch (command)
             {
                 // ---- meta / read ------------------------------------------------
@@ -76,7 +90,7 @@ namespace RevitMCP.Addin
                                                                    GetString(p, "new_name"));
                 case "save_family_as":     return SaveFamilyAs(uidoc, GetString(p, "path"),
                                                                GetBoolOr(p, "overwrite", false));
-                case "execute_code":     return ExecuteCode(app, GetString(p, "code"));
+                case "execute_code":     return ExecuteCode(app, GetString(p, "code"), GetBoolOr(p, "transaction", true));
 
                 // ---- CAD link driven modelling (CommandRouter.Cad.cs) -----------
                 case "list_cad_links":        return ListCadLinks(RequireDoc(uidoc), GetBoolOr(p, "include_layers", true),
@@ -86,6 +100,15 @@ namespace RevitMCP.Addin
                 case "create_doors_from_cad": return CreateDoorsFromCad(uidoc, p);
                 case "snapshot_region":       return SnapshotRegion(uidoc, p);
                 case "create_columns_from_cad": return CreateColumnsFromCad(uidoc, p);
+                case "create_windows_from_cad": return CreateWindowsFromCad(uidoc, p);
+                case "create_stairs_from_cad":  return CreateStairsFromCad(uidoc, p);
+
+                // ---- project set-up / benchmarking (CommandRouter.Project.cs) ---
+                case "open_document":          return OpenDocument(app, p);
+                case "create_floor_plan_view": return CreateFloorPlanView(uidoc, p);
+                case "link_cad":               return LinkCad(uidoc, p);
+                case "export_dwg":             return ExportDwg(app, p);
+                case "dump_model":             return DumpModel(app, p);
 
                 default:
                     throw new McpException(McpException.UnknownCommand, $"Unknown command: {command}");
@@ -573,7 +596,11 @@ namespace RevitMCP.Addin
                     var fh = t.GetFailureHandlingOptions();
                     fh.SetFailuresPreprocessor(new SilentFailures());
                     t.SetFailureHandlingOptions(fh);
-                    tempId = view.Duplicate(ViewDuplicateOption.Duplicate);
+                    // View-specific DWG links ("current view only") only survive a
+                    // WithDetailing duplicate; plain Duplicate drops them.
+                    var hasViewLinks = !hideLinks && new FilteredElementCollector(doc, view.Id)
+                        .OfClass(typeof(ImportInstance)).Cast<ImportInstance>().Any(li => li.ViewSpecific);
+                    tempId = view.Duplicate(hasViewLinks ? ViewDuplicateOption.WithDetailing : ViewDuplicateOption.Duplicate);
                     var tv = (View)doc.GetElement(tempId);
                     tv.Name = "MCP snapshot " + Guid.NewGuid().ToString("N").Substring(0, 8);
                     tv.CropBoxActive = true; tv.CropBoxVisible = false;
@@ -1170,7 +1197,7 @@ namespace RevitMCP.Addin
         // ---- execute_code (dual-use: only exposed when the MCP server sets ---
         // ---- REVIT_MCP_ENABLE_CODE — see the README's warning section) -------
 
-        private static Dictionary<string, object> ExecuteCode(UIApplication app, string code)
+        private static Dictionary<string, object> ExecuteCode(UIApplication app, string code, bool transaction = true)
         {
             EnsureWritable();
             var uidoc = app.ActiveUIDocument;
@@ -1195,9 +1222,23 @@ public static class McpDynamicCode
             var assembly = DynamicCompiler.Compile(source, prefixLines);
             var run = assembly.GetType("McpDynamicCode").GetMethod("Run");
             object value;
+            if (!transaction)
+            {
+                // No transaction: for read-only code and for calls that Revit refuses
+                // inside one (OpenAndActivateDocument, Export...). The code must open
+                // its own Transaction if it modifies the model.
+                try { value = run.Invoke(null, new object[] { app, uidoc, doc }); }
+                catch (System.Reflection.TargetInvocationException ex) { throw ex.InnerException ?? ex; }
+                return new Dictionary<string, object> { ["result"] = Jsonable(value, 0) };
+            }
             using (var t = new Transaction(doc, "MCP: execute code"))
             {
                 t.Start();
+                // Warnings must not pop a modal dialog (that would freeze the bridge -
+                // nobody is at the screen); errors still surface as exceptions.
+                var fho = t.GetFailureHandlingOptions();
+                fho.SetFailuresPreprocessor(new SilentFailures());
+                t.SetFailureHandlingOptions(fho);
                 try
                 {
                     value = run.Invoke(null, new object[] { app, uidoc, doc });

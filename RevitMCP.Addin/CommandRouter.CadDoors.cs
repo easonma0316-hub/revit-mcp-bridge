@@ -392,7 +392,7 @@ namespace RevitMCP.Addin
             // ---- 5. place ---------------------------------------------------------
             var existing = skipExisting
                 ? new FilteredElementCollector(doc).OfClass(typeof(FamilyInstance)).OfCategory(BuiltInCategory.OST_Doors)
-                    .Cast<FamilyInstance>().Where(f => f.Location is LocationPoint)
+                    .Cast<FamilyInstance>().Where(f => f.Location is LocationPoint && f.LevelId == level.Id) // same level only
                     .Select(f => { var lp = (LocationPoint)f.Location; return new[] { FtToMm(lp.Point.X), FtToMm(lp.Point.Y) }; }).ToList()
                 : new List<double[]>();
 

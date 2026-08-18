@@ -142,7 +142,14 @@ Details, build instructions and how to add tools: see [DEVELOPMENT.md](DEVELOPME
 | `create_walls_from_cad` | write | Wall layer(s) → paired faces → centerlines → `Wall.Create` (dry-run first) |
 | `create_doors_from_cad` | write | Door swing arcs → hosted doors with correct hand/facing, types auto-created by width |
 | `create_columns_from_cad` | write | Column rectangles/circles → structural (or architectural) columns, types by size |
+| `create_windows_from_cad` | write | Window symbol lines along a wall → hosted windows, types by width (walls built with `window_layers`) |
+| `create_stairs_from_cad` | write | Tread-line combs → stairs (straight runs + automatic landings), riser count from the drawing |
 | `snapshot_region` | read | PNG of a plan region (bbox in mm; highlight walls/doors, hide the DWG) — look at CAD vs. modelled result |
+| `open_document` | write | Open and activate a .rvt file |
+| `create_floor_plan_view` | write | New floor/ceiling plan view on a level |
+| `link_cad` | write | Link (or import) a DWG onto a view |
+| `export_dwg` | write | Export views to DWG files (mm, R2018) |
+| `dump_model` | read | Dump walls/doors/windows/columns/stairs/floors/grids to JSON (mm) — for `dev/compare_models.py` |
 
 All lengths and coordinates cross the API in **millimeters** (the add-in
 converts to Revit's internal feet); parameter values use the model's **display
@@ -179,6 +186,11 @@ Workflow, on a floor plan whose DWG has separate wall / door layers:
    then run doors again with `host_tolerance_mm=200`.
 5. `create_columns_from_cad(link_id, layers=["A-COLUMN"], level_id, height_mm)`
    for the column layer (rectangles + circles).
+   Windows: build the walls with `window_layers=["A-WINDOW"]` (the wall then
+   runs through the window openings) and call
+   `create_windows_from_cad(link_id, layers=["A-WINDOW"], level_id)` — the
+   window lines drawn along the wall give width and centre; sill via
+   `sill_height_mm`. Unknown/imperial wall thicknesses: `auto_thicknesses=True`.
 6. `snapshot_region(bbox_mm=..., highlight=True, hide_links=True)` → open the
    PNG and compare the modelled walls/doors/columns with the CAD; fix by hand
    or re-run with different layers / tolerances.
