@@ -58,10 +58,28 @@ pipx install git+https://github.com/easonma0316-hub/revit-mcp-bridge
 claude mcp add revit -- revit-mcp-bridge
 ```
 
+No uv / pipx? Plain `pip` works too:
+
+```powershell
+pip install git+https://github.com/easonma0316-hub/revit-mcp-bridge
+claude mcp add revit -- revit-mcp-bridge            # or, if Scripts\ isn't on PATH:
+claude mcp add revit -- python -m mcp_server.server
+```
+
 Restart your MCP client and run `/mcp` — you should see `revit` with its tools.
 Other MCP clients (Claude Desktop, Cursor, …) use the same command
 (`uvx --from git+https://github.com/easonma0316-hub/revit-mcp-bridge revit-mcp-bridge`)
 in their MCP config.
+
+**Locked-down / corporate machines:** nothing here needs admin rights or writes
+outside your user profile — the add-in goes to `%APPDATA%\Autodesk\Revit\Addins\<year>`,
+the log to `%LOCALAPPDATA%\RevitMCP\` (falls back to `%TEMP%`), exported images to
+`%TEMP%\RevitMCP\`, and the listener binds `127.0.0.1` only (no firewall/URL-ACL
+setup). If `install.ps1` is blocked by execution policy, run it with
+`powershell -ExecutionPolicy Bypass -File .\install.ps1`, or just copy the year
+folder's files into the Addins path by hand. If `pip` can't reach GitHub, use
+`pip install mcp<2 httpx` from your internal mirror plus a source checkout
+(`python <repo>\mcp_server\server.py`).
 
 **Upgrading:** download the new zip and rerun `install.ps1` (Revit may need a
 restart if it was open); the Python side updates on the next `uvx` run
