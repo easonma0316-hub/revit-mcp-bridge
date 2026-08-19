@@ -411,7 +411,10 @@ def create_walls_from_cad(link_id: int, layers: list[str], level_id: int,
                           use_existing_walls: bool = True,
                           skip_existing: bool = True,
                           max_walls: int = 1000) -> dict:
-    """Build Revit walls from the wall layer(s) of a CAD link. Algorithm: every
+    """Build Revit walls from the wall layer(s) of a CAD link. Top: give
+    `top_level_id` (Top Constraint "Up to level", like a hand-modelled wall,
+    optional `top_offset_mm`) or an unconnected `height_mm`; `base_offset_mm`
+    lifts the base (e.g. onto a finish floor). Algorithm: every
     line / polyline edge on `layers` becomes a segment; parallel segments whose
     distance matches a wall thickness (`thicknesses_mm`, default common
     100..400 mm values, +-`tolerance_mm`) and that overlap by >= `min_length_mm`
@@ -456,7 +459,9 @@ def create_walls_from_cad(link_id: int, layers: list[str], level_id: int,
     and walls that already exist are skipped (`skip_existing`)."""
     return _call("create_walls_from_cad", {
         "link_id": link_id, "layers": layers, "level_id": level_id,
-        "height_mm": height_mm, "bbox_mm": bbox_mm, "dry_run": dry_run,
+        "height_mm": height_mm, "top_level_id": top_level_id,
+        "top_offset_mm": top_offset_mm, "base_offset_mm": base_offset_mm,
+        "bbox_mm": bbox_mm, "dry_run": dry_run,
         "thicknesses_mm": thicknesses_mm, "auto_thicknesses": auto_thicknesses,
         "tolerance_mm": tolerance_mm,
         "min_length_mm": min_length_mm, "merge_gap_mm": merge_gap_mm,

@@ -363,7 +363,29 @@ namespace RevitMCP.Addin
                 throw new McpException(McpException.BadRequest, "Provide the wall layer(s) via 'layer' or 'layers' (or 'centerline_layers').");
             var level = doc.GetElement(new ElementId(GetLong(p, "level_id"))) as Level
                         ?? throw new McpException(McpException.NotFound, "'level_id' is not a Level (see list_levels).");
-            var heightMm = GetDouble(p, "height_mm");
+            // top: "Up to level" (top_level_id [+ top_offset_mm]) like a hand-modelled wall, or an
+            // unconnected height_mm; base_offset_mm shifts the base (e.g. onto a finish floor)
+            var topLevelIdOpt = GetOptLong(p, "top_level_id");
+            var topLevel = topLevelIdOpt.HasValue ? doc.GetElement(new ElementId(topLevelIdOpt.Value)) as Level : null;
+            if (topLevelIdOpt.HasValue && topLevel == null)
+                throw new McpException(McpException.NotFound, "'top_level_id' is not a Level (see list_levels).");
+            double topOffsetMm = GetDoubleOr(p, "top_offset_mm", 0), baseOffsetMm = GetDoubleOr(p, "base_offset_mm", 0);
+            double heightMm;
+            if (topLevel != null)
+            {
+                heightMm = FtToMm(topLevel.Elevation - level.Elevation) + topOffsetMm - baseOffsetMm;
+                if (heightMm <= 0) throw new McpException(McpException.BadRequest, "'top_level_id' must be above 'level_id'.");
+            }
+            else heightMm = GetDouble(p, "height_mm");
+            void ApplyConstraints(Wall wall)
+            {
+                if (topLevel != null)
+                {
+                    wall.get_Parameter(BuiltInParameter.WALL_HEIGHT_TYPE)?.Set(topLevel.Id);
+                    if (Math.Abs(topOffsetMm) > 1e-6) wall.get_Parameter(BuiltInParameter.WALL_TOP_OFFSET)?.Set(MmToFt(topOffsetMm));
+                }
+                if (Math.Abs(baseOffsetMm) > 1e-6) wall.get_Parameter(BuiltInParameter.WALL_BASE_OFFSET)?.Set(MmToFt(baseOffsetMm));
+            }
             var bbox = GetOptBboxMm(p);
             var thicknesses = GetDoubleListOr(p, "thicknesses_mm", DefaultThicknessesMm);
             bool autoThick = GetBoolOr(p, "auto_thicknesses", false);
@@ -1394,6 +1416,7 @@ namespace RevitMCP.Addin
                             var s = new XYZ(MmToFt(w.Dx * w.T1 + w.Nx * w.Offset), MmToFt(w.Dy * w.T1 + w.Ny * w.Offset), z);
                             var e = new XYZ(MmToFt(w.Dx * w.T2 + w.Nx * w.Offset), MmToFt(w.Dy * w.T2 + w.Ny * w.Offset), z);
                             var wall = Wall.Create(doc, Line.CreateBound(s, e), wt.Id, level.Id, MmToFt(heightMm), 0, false, false);
+                            ApplyConstraints(wall);
                             walls.Add(Describe(w, wt, wall));
                         }
                         catch (Exception ex)
@@ -1409,6 +1432,7 @@ namespace RevitMCP.Addin
                             var centre = new XYZ(MmToFt(c.Cx), MmToFt(c.Cy), z);
                             var arc = Arc.Create(centre, MmToFt(c.R), c.A0, c.A1, XYZ.BasisX, XYZ.BasisY);
                             var wall = Wall.Create(doc, arc, wt.Id, level.Id, MmToFt(heightMm), 0, false, false);
+                            ApplyConstraints(wall);
                             walls.Add(DescribeCurved(c, wt, wall));
                         }
                         catch (Exception ex)
