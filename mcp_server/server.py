@@ -373,7 +373,8 @@ def list_cad_links(include_layers: bool = True, layer_limit: int = 200) -> dict:
 @mcp.tool()
 def get_cad_geometry(link_id: int, layers: list[str] | None = None,
                      bbox_mm: list[list[float]] | None = None,
-                     limit: int = 500) -> dict:
+                     limit: int = 500,
+                     summary_only: bool = False) -> dict:
     """Read raw curves from a CAD link, in millimeters / model coordinates.
     `layers` filters by layer name (omit for all); `bbox_mm` =
     [[xmin, ymin], [xmax, ymax]] keeps only curves touching that rectangle
@@ -381,8 +382,8 @@ def get_cad_geometry(link_id: int, layers: list[str] | None = None,
     Each curve has kind = line {start, end} | arc {center, radius_mm, start,
     end, mid, sweep_deg} | circle {center, radius_mm} | polyline {points,
     closed}. Use it to inspect how walls/doors are drawn, or to drive
-    create_wall / place_family_instance by hand on a small area."""
-    return _call("get_cad_geometry", {"link_id": link_id, "layers": layers,
+    create_wall / place_family_instance by hand on a small area. summary_only=True returns only counts / failures / warnings with a 3-item sample of each list (saves tokens; rerun without it for the full list)."""
+    return _call("get_cad_geometry", {"summary_only": summary_only, "link_id": link_id, "layers": layers,
                                       "bbox_mm": bbox_mm, "limit": limit})
 
 
@@ -410,7 +411,8 @@ def create_walls_from_cad(link_id: int, layers: list[str], level_id: int,
                           centerline_type_id: int | None = None,
                           use_existing_walls: bool = True,
                           skip_existing: bool = True,
-                          max_walls: int = 1000) -> dict:
+                          max_walls: int = 1000,
+                          summary_only: bool = False) -> dict:
     """Build Revit walls from the wall layer(s) of a CAD link. Top: give
     `top_level_id` (Top Constraint "Up to level", like a hand-modelled wall,
     optional `top_offset_mm`) or an unconnected `height_mm`; `base_offset_mm`
@@ -456,8 +458,8 @@ def create_walls_from_cad(link_id: int, layers: list[str], level_id: int,
     running along real walls (planned or already in the model) are dropped.
     `layers` may be empty when only centerline walls are wanted. Existing walls
     on the level are used for dedupe and end snapping (`use_existing_walls`),
-    and walls that already exist are skipped (`skip_existing`)."""
-    return _call("create_walls_from_cad", {
+    and walls that already exist are skipped (`skip_existing`). summary_only=True returns only counts / failures / warnings with a 3-item sample of each list (saves tokens; rerun without it for the full list)."""
+    return _call("create_walls_from_cad", {"summary_only": summary_only, 
         "link_id": link_id, "layers": layers, "level_id": level_id,
         "height_mm": height_mm, "top_level_id": top_level_id,
         "top_offset_mm": top_offset_mm, "base_offset_mm": base_offset_mm,
@@ -493,7 +495,8 @@ def create_doors_from_cad(link_id: int, layers: list[str], level_id: int,
                           ai_tag: str = "_AI",
                           host_tolerance_mm: float = 60.0,
                           min_single_width_mm: float = 600.0,
-                          skip_existing: bool = True) -> dict:
+                          skip_existing: bool = True,
+                          summary_only: bool = False) -> dict:
     """Place hosted doors from the door swing arcs on CAD layer(s) - run AFTER
     the walls exist (create_walls_from_cad). Each quarter-circle arc = one leaf:
     centre = hinge, radius = leaf width; the arc end on the wall is the latch,
@@ -515,8 +518,8 @@ def create_doors_from_cad(link_id: int, layers: list[str], level_id: int,
     CAD arc, so family conventions don't matter. Doors within 200 mm of an
     existing door are skipped (`skip_existing`). Start with dry_run=True: it
     lists planned doors (kind/width/centre/host/type), unhosted arcs and
-    warnings without touching the model."""
-    return _call("create_doors_from_cad", {
+    warnings without touching the model. summary_only=True returns only counts / failures / warnings with a 3-item sample of each list (saves tokens; rerun without it for the full list)."""
+    return _call("create_doors_from_cad", {"summary_only": summary_only, 
         "link_id": link_id, "layers": layers, "level_id": level_id,
         "bbox_mm": bbox_mm, "dry_run": dry_run, "type_map": type_map,
         "create_missing_types": create_missing_types,
@@ -543,7 +546,8 @@ def create_columns_from_cad(link_id: int, layers: list[str], level_id: int,
                             size_tolerance_mm: float = 25.0,
                             create_missing_types: bool = True,
                             ai_tag: str = "_AI",
-                            skip_existing: bool = True) -> dict:
+                            skip_existing: bool = True,
+                            summary_only: bool = False) -> dict:
     """Place columns from a CAD column layer: every closed 4-corner rectangle
     (perpendicular sides) becomes a rectangular column (longer side = Width,
     rotated to match), every circle (or arcs closing a full turn) a round
@@ -557,8 +561,8 @@ def create_columns_from_cad(link_id: int, layers: list[str], level_id: int,
     "125mm_AI" for a 250 mm column) with Type Comments marking it AI-made.
     Extent: base = `level_id`, top = `top_level_id` or base + `height_mm`.
     Duplicated footprints in the drawing and columns already in the model
-    (within 100 mm) are skipped. dry_run=True first to see the plan."""
-    return _call("create_columns_from_cad", {
+    (within 100 mm) are skipped. dry_run=True first to see the plan. summary_only=True returns only counts / failures / warnings with a 3-item sample of each list (saves tokens; rerun without it for the full list)."""
+    return _call("create_columns_from_cad", {"summary_only": summary_only, 
         "link_id": link_id, "layers": layers, "level_id": level_id,
         "height_mm": height_mm, "top_level_id": top_level_id,
         "bbox_mm": bbox_mm, "dry_run": dry_run, "structural": structural,
@@ -584,7 +588,8 @@ def create_windows_from_cad(link_id: int, layers: list[str], level_id: int,
                             width_tolerance_mm: float = 50.0,
                             create_missing_types: bool = True,
                             ai_tag: str = "_AI",
-                            skip_existing: bool = True) -> dict:
+                            skip_existing: bool = True,
+                            summary_only: bool = False) -> dict:
     """Place hosted windows from the window symbol lines on CAD layer(s) - run
     AFTER create_walls_from_cad (called with the same `window_layers`, so the
     walls run through the window openings). A plan window is a bundle of
@@ -601,8 +606,8 @@ def create_windows_from_cad(link_id: int, layers: list[str], level_id: int,
     the nearest type (name by its convention + `ai_tag`, Type Comments say
     AI-made). Sill = `sill_height_mm` above the level. Windows within 200 mm
     of an existing window are skipped. dry_run=True first: lists planned
-    windows (width/centre/host/type), unhosted segments and warnings."""
-    return _call("create_windows_from_cad", {
+    windows (width/centre/host/type), unhosted segments and warnings. summary_only=True returns only counts / failures / warnings with a 3-item sample of each list (saves tokens; rerun without it for the full list)."""
+    return _call("create_windows_from_cad", {"summary_only": summary_only, 
         "link_id": link_id, "layers": layers, "level_id": level_id,
         "bbox_mm": bbox_mm, "dry_run": dry_run, "sill_height_mm": sill_height_mm,
         "host_tolerance_mm": host_tolerance_mm, "min_width_mm": min_width_mm,
@@ -621,7 +626,8 @@ def create_roofs_from_cad(link_id: int, layers: list[str], level_id: int,
                           min_area_m2: float = 5.0, join_tolerance_mm: float = 25.0,
                           inner_loops_as_openings: bool = True,
                           bbox_mm: list[list[float]] | None = None,
-                          dry_run: bool = True) -> dict:
+                          dry_run: bool = True,
+                          summary_only: bool = False) -> dict:
     """Flat footprint roofs from roof outlines on CAD layer(s): closed polylines
     or chains of lines/arcs whose ends meet within `join_tolerance_mm`; loops
     under `min_area_m2` ignored; a loop inside another becomes an opening. Roof
@@ -631,8 +637,8 @@ def create_roofs_from_cad(link_id: int, layers: list[str], level_id: int,
     usable outline (common in plan exports: only edges outside the parapets
     are drawn), use create_floor_from_walls(kind="roof") instead. dry_run
     lists the loops (area, vertices, bbox, outline points) and the available
-    roof types - confirm thickness / type with the user before building."""
-    return _call("create_roofs_from_cad", {
+    roof types - confirm thickness / type with the user before building. summary_only=True returns only counts / failures / warnings with a 3-item sample of each list (saves tokens; rerun without it for the full list)."""
+    return _call("create_roofs_from_cad", {"summary_only": summary_only, 
         "link_id": link_id, "layers": layers, "level_id": level_id, "thickness_mm": thickness_mm,
         "offset_mm": offset_mm, "type_id": type_id, "type_name": type_name, "min_area_m2": min_area_m2,
         "join_tolerance_mm": join_tolerance_mm, "inner_loops_as_openings": inner_loops_as_openings,
@@ -651,7 +657,8 @@ def create_railings_from_cad(link_id: int, layers: list[str], level_id: int,
                              exclude_bboxes_mm: list[list[list[float]]] | None = None,
                              base_offset_mm: float = 0.0, skip_existing: bool = True,
                              bbox_mm: list[list[float]] | None = None,
-                             dry_run: bool = True) -> dict:
+                             dry_run: bool = True,
+                             summary_only: bool = False) -> dict:
     """Railings from the railing layer(s) of a plan: railings are drawn as thin
     outlines / parallel lines (`double_line_mm` apart) - they are collapsed to
     a midline, chained into paths (ends within `join_tolerance_mm`), short
@@ -662,8 +669,8 @@ def create_railings_from_cad(link_id: int, layers: list[str], level_id: int,
     `exclude_bboxes_mm` ([[[x0,y0],[x1,y1]], ...]) are skipped - stair
     railings belong to the stairs. Type: `type_id` / `type_name` / nearest
     `height_mm` (railing types and their heights are listed in the result) -
-    confirm height/type with the user first. dry_run lists the paths."""
-    return _call("create_railings_from_cad", {
+    confirm height/type with the user first. dry_run lists the paths. summary_only=True returns only counts / failures / warnings with a 3-item sample of each list (saves tokens; rerun without it for the full list)."""
+    return _call("create_railings_from_cad", {"summary_only": summary_only, 
         "link_id": link_id, "layers": layers, "level_id": level_id, "type_id": type_id, "type_name": type_name,
         "height_mm": height_mm, "min_segment_mm": min_segment_mm, "min_path_mm": min_path_mm,
         "join_tolerance_mm": join_tolerance_mm, "double_line_mm": double_line_mm, "path_duplicate_mm": path_duplicate_mm,
@@ -686,7 +693,8 @@ def create_curtain_walls_from_cad(link_id: int, layers: list[str], level_id: int
                                   double_line_mm: float = 200.0, mullion_max_area_m2: float = 0.05,
                                   skip_existing: bool = True,
                                   bbox_mm: list[list[float]] | None = None,
-                                  dry_run: bool = True, ai_tag: str = "_AI") -> dict:
+                                  dry_run: bool = True, ai_tag: str = "_AI",
+                                  summary_only: bool = False) -> dict:
     """Curtain walls from glazing lines: collinear segments on `layers` with gaps
     <= `join_gap_mm` (a mullion sits in the gap) form one run (>= `min_run_mm`);
     the two faces of a glazing line (`double_line_mm` apart) collapse into one.
@@ -699,8 +707,8 @@ def create_curtain_walls_from_cad(link_id: int, layers: list[str], level_id: int
     lines and borders. Height: `top_level_id` (+`top_offset_mm`) or
     `height_mm` - the height is NOT in the plan: dry_run first, confirm with
     the user, then build. Existing curtain walls passing through the level
-    (multi-storey glazing built once) are not rebuilt."""
-    return _call("create_curtain_walls_from_cad", {
+    (multi-storey glazing built once) are not rebuilt. summary_only=True returns only counts / failures / warnings with a 3-item sample of each list (saves tokens; rerun without it for the full list)."""
+    return _call("create_curtain_walls_from_cad", {"summary_only": summary_only, 
         "link_id": link_id, "layers": layers, "level_id": level_id, "height_mm": height_mm,
         "top_level_id": top_level_id, "top_offset_mm": top_offset_mm, "base_offset_mm": base_offset_mm,
         "mullion_layers": mullion_layers, "type_id": type_id, "type_name": type_name,
@@ -713,21 +721,23 @@ def create_curtain_walls_from_cad(link_id: int, layers: list[str], level_id: int
 
 
 @mcp.tool()
-def list_warnings(max_ids: int = 20, include_swallowed: bool = True) -> dict:
+def list_warnings(max_ids: int = 20, include_swallowed: bool = True,
+                  summary_only: bool = False) -> dict:
     """List the document's warnings - what Revit's 'Review Warnings' dialog shows
     (walls overlap, elements joined but not intersecting, duplicate Mark values,
     slightly off axis, room not enclosed, ...), grouped by description with
     counts, categories, involved element ids (up to `max_ids`) and whether
     `fix_warnings` can fix the class automatically. `include_swallowed` adds the
     transient warnings the add-in dismissed while running MCP commands (since
-    Revit started). Read-only."""
-    return _call("list_warnings", {"max_ids": max_ids, "include_swallowed": include_swallowed})
+    Revit started). Read-only. summary_only=True returns only counts / failures / warnings with a 3-item sample of each list (saves tokens; rerun without it for the full list)."""
+    return _call("list_warnings", {"summary_only": summary_only, "max_ids": max_ids, "include_swallowed": include_swallowed})
 
 
 @mcp.tool()
 def fix_warnings(dry_run: bool = True, kinds: list[str] | None = None,
                  duplicate_tolerance_mm: float = 50.0, touch_tolerance_mm: float = 5.0,
-                 max_fixes: int = 500) -> dict:
+                 max_fixes: int = 500,
+                 summary_only: bool = False) -> dict:
     """Fix the warning classes that are safe to automate: UnjoinDisjoint
     ('joined but do not intersect' -> unjoin), DeleteDuplicateWall ('walls
     overlap' between parallel straight walls: footprints merely touching / grazing
@@ -738,8 +748,8 @@ def fix_warnings(dry_run: bool = True, kinds: list[str] | None = None,
     ClearDuplicateMark (duplicate 'Mark' -> clear all but the first). `kinds`
     restricts to some of those names. dry_run=True returns the plan (actions
     + skipped with reasons) without touching the model; dry_run=False applies
-    it and reports warnings before/after."""
-    return _call("fix_warnings", {"dry_run": dry_run, "kinds": kinds,
+    it and reports warnings before/after. summary_only=True returns only counts / failures / warnings with a 3-item sample of each list (saves tokens; rerun without it for the full list)."""
+    return _call("fix_warnings", {"summary_only": summary_only, "dry_run": dry_run, "kinds": kinds,
                                   "duplicate_tolerance_mm": duplicate_tolerance_mm,
                                   "touch_tolerance_mm": touch_tolerance_mm,
                                   "max_fixes": max_fixes},
@@ -762,7 +772,8 @@ def create_floor_from_walls(level_id: int, gap_mm: float = 150.0,
                             type_name: str | None = None,
                             thickness_mm: float | None = None,
                             dry_run: bool = True,
-                            ai_tag: str = "_AI") -> dict:
+                            ai_tag: str = "_AI",
+                            summary_only: bool = False) -> dict:
     """Create the floor slab(s) (kind="floor") or a flat footprint roof
     (kind="roof", type from the roof types, `offset_mm` = base offset) of a
     level from the walls already modelled on it
@@ -777,8 +788,8 @@ def create_floor_from_walls(level_id: int, gap_mm: float = 150.0,
     between min/max hole area into openings (shafts) - 0 = solid slab. Type:
     `type_id`, `type_name` (substring), else the default floor type;
     `thickness_mm` duplicates it as "<type> <mm>mm_AI" with the core layer
-    resized. dry_run=True first (area, vertex count, bbox per planned floor)."""
-    return _call("create_floor_from_walls", {
+    resized. dry_run=True first (area, vertex count, bbox per planned floor). summary_only=True returns only counts / failures / warnings with a 3-item sample of each list (saves tokens; rerun without it for the full list)."""
+    return _call("create_floor_from_walls", {"summary_only": summary_only, 
         "level_id": level_id, "gap_mm": gap_mm, "kind": kind, "offset_mm": offset_mm,
         "link_id": link_id, "layers": layers,
         "cad_thickness_mm": cad_thickness_mm, "min_area_m2": min_area_m2,
@@ -798,14 +809,15 @@ def create_floors_from_cad(link_id: int, layers: list[str], level_id: int,
                            bbox_mm: list[list[float]] | None = None,
                            type_id: int | None = None,
                            type_name: str | None = None,
-                           dry_run: bool = True) -> dict:
+                           dry_run: bool = True,
+                           summary_only: bool = False) -> dict:
     """Create floors from closed outlines on CAD layer(s): closed polylines,
     circles, and (chain_lines) closed chains of lines/arcs whose ends meet
     within `join_tolerance_mm`. A loop lying inside another becomes a hole of
     the smallest containing loop (inner_loops_as_holes; islands inside holes
     are floors again). Loops under `min_area_m2` are ignored. Type: `type_id`,
-    `type_name` (substring) or the default floor type. dry_run=True first."""
-    return _call("create_floors_from_cad", {
+    `type_name` (substring) or the default floor type. dry_run=True first. summary_only=True returns only counts / failures / warnings with a 3-item sample of each list (saves tokens; rerun without it for the full list)."""
+    return _call("create_floors_from_cad", {"summary_only": summary_only, 
         "link_id": link_id, "layers": layers, "level_id": level_id,
         "min_area_m2": min_area_m2, "join_tolerance_mm": join_tolerance_mm,
         "chain_lines": chain_lines, "inner_loops_as_holes": inner_loops_as_holes,
@@ -839,7 +851,8 @@ def create_stairs_from_cad(link_id: int, layers: list[str], level_id: int,
                            riser_max_mm: float = 220.0,
                            riser_target_mm: float = 170.0,
                            min_risers: int = 5,
-                           width_add_mm: float = 0.0) -> dict:
+                           width_add_mm: float = 0.0,
+                           summary_only: bool = False) -> dict:
     """Build stairs from the tread lines on CAD stair layer(s): a run is a comb
     of >= `min_treads` parallel, equal-length (= run width), equally spaced
     (= tread depth, within tread_min/max) lines; runs whose ends lie within
@@ -866,8 +879,8 @@ def create_stairs_from_cad(link_id: int, layers: list[str], level_id: int,
     existing stair on the base level are skipped. Needs its own
     StairsEditScope, so it cannot run inside execute_code's transaction.
     dry_run=True first: lists planned stairs (runs, risers, riser height,
-    direction source, bbox)."""
-    return _call("create_stairs_from_cad", {
+    direction source, bbox). summary_only=True returns only counts / failures / warnings with a 3-item sample of each list (saves tokens; rerun without it for the full list)."""
+    return _call("create_stairs_from_cad", {"summary_only": summary_only, 
         "link_id": link_id, "layers": layers, "level_id": level_id,
         "top_level_id": top_level_id, "height_mm": height_mm, "bbox_mm": bbox_mm,
         "dry_run": dry_run, "arrow_layers": arrow_layers, "type_id": type_id,

@@ -33,6 +33,45 @@ namespace RevitMCP.Addin
         public static Dictionary<string, object> Route(UIApplication app, string command, Dictionary<string, object> p)
         {
             p = p ?? new Dictionary<string, object>();
+            var result = RouteCore(app, command, p);
+            // summary_only: keep counts / failures / warnings, drop the long per-element lists
+            // (an MCP client pays tokens for every byte of the result)
+            if (GetBoolOr(p, "summary_only", false)) result = SummarizeResult(result);
+            return result;
+        }
+
+        private static Dictionary<string, object> SummarizeResult(Dictionary<string, object> r, int sample = 3, int maxStrings = 20)
+        {
+            if (r == null) return null;
+            var outp = new Dictionary<string, object>();
+            foreach (var kv in r)
+            {
+                var v = kv.Value;
+                if (v is string || v == null || v is bool || v is int || v is long || v is double || v is float || v is decimal) { outp[kv.Key] = v; continue; }
+                if (v is Dictionary<string, object> d) { outp[kv.Key] = SummarizeResult(d, sample, maxStrings); continue; }
+                if (v is System.Collections.IList list)
+                {
+                    int n = list.Count;
+                    bool scalarList = n == 0 || list[0] is string || list[0] is double || list[0] is long || list[0] is int;
+                    if (scalarList)
+                    {
+                        if (n <= maxStrings) { outp[kv.Key] = v; continue; }
+                        var head = new List<object>(); for (int i = 0; i < maxStrings; i++) head.Add(list[i]);
+                        head.Add($"... ({n - maxStrings} more, summary_only)");
+                        outp[kv.Key] = head; continue;
+                    }
+                    if (n <= sample) { outp[kv.Key] = v; continue; }
+                    var smp = new List<object>(); for (int i = 0; i < sample; i++) smp.Add(list[i]);
+                    outp[kv.Key] = new Dictionary<string, object> { ["count"] = n, ["sample"] = smp, ["note"] = "list truncated (summary_only=true); rerun without it for the full list" };
+                    continue;
+                }
+                outp[kv.Key] = v;
+            }
+            return outp;
+        }
+
+        private static Dictionary<string, object> RouteCore(UIApplication app, string command, Dictionary<string, object> p)
+        {
             var uidoc = app.ActiveUIDocument;
 
             // Safety net for multi-document sessions: a caller that knows which model
