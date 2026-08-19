@@ -610,6 +610,70 @@ def create_windows_from_cad(link_id: int, layers: list[str], level_id: int,
 
 
 @mcp.tool()
+def create_floor_from_walls(level_id: int, gap_mm: float = 150.0,
+                            link_id: int | None = None,
+                            layers: list[str] | None = None,
+                            cad_thickness_mm: float = 100.0,
+                            min_area_m2: float = 10.0,
+                            min_hole_area_m2: float = 0.0,
+                            max_hole_area_m2: float = 40.0,
+                            exterior_only: bool = False,
+                            wall_ids: list[int] | None = None,
+                            bbox_mm: list[list[float]] | None = None,
+                            type_id: int | None = None,
+                            type_name: str | None = None,
+                            thickness_mm: float | None = None,
+                            dry_run: bool = True,
+                            ai_tag: str = "_AI") -> dict:
+    """Create the floor slab(s) of a level from the walls already modelled on it
+    (architectural plans rarely draw slab outlines - the outer wall faces are the
+    slab edge). Every wall footprint on `level_id` (optionally only `wall_ids`,
+    `exterior_only` = Function: Exterior, or inside `bbox_mm`) is inflated by
+    `gap_mm` (closes gaps up to 2*gap: unmodelled doors / curtain walls),
+    unioned; the outer loop of each connected part >= `min_area_m2` is deflated
+    again and becomes one floor. Lines on CAD `layers` of `link_id` (curtain
+    walls, shopfront glazing - whatever closes the outline but is not modelled
+    as walls) join the union as `cad_thickness_mm` strips. `min_hole_area_m2` > 0 turns enclosed regions
+    between min/max hole area into openings (shafts) - 0 = solid slab. Type:
+    `type_id`, `type_name` (substring), else the default floor type;
+    `thickness_mm` duplicates it as "<type> <mm>mm_AI" with the core layer
+    resized. dry_run=True first (area, vertex count, bbox per planned floor)."""
+    return _call("create_floor_from_walls", {
+        "level_id": level_id, "gap_mm": gap_mm, "link_id": link_id, "layers": layers,
+        "cad_thickness_mm": cad_thickness_mm, "min_area_m2": min_area_m2,
+        "min_hole_area_m2": min_hole_area_m2, "max_hole_area_m2": max_hole_area_m2,
+        "exterior_only": exterior_only, "wall_ids": wall_ids, "bbox_mm": bbox_mm,
+        "type_id": type_id, "type_name": type_name, "thickness_mm": thickness_mm,
+        "dry_run": dry_run, "ai_tag": ai_tag},
+        timeout=None if dry_run else BATCH_TIMEOUT)
+
+
+@mcp.tool()
+def create_floors_from_cad(link_id: int, layers: list[str], level_id: int,
+                           min_area_m2: float = 1.0,
+                           join_tolerance_mm: float = 10.0,
+                           chain_lines: bool = True,
+                           inner_loops_as_holes: bool = True,
+                           bbox_mm: list[list[float]] | None = None,
+                           type_id: int | None = None,
+                           type_name: str | None = None,
+                           dry_run: bool = True) -> dict:
+    """Create floors from closed outlines on CAD layer(s): closed polylines,
+    circles, and (chain_lines) closed chains of lines/arcs whose ends meet
+    within `join_tolerance_mm`. A loop lying inside another becomes a hole of
+    the smallest containing loop (inner_loops_as_holes; islands inside holes
+    are floors again). Loops under `min_area_m2` are ignored. Type: `type_id`,
+    `type_name` (substring) or the default floor type. dry_run=True first."""
+    return _call("create_floors_from_cad", {
+        "link_id": link_id, "layers": layers, "level_id": level_id,
+        "min_area_m2": min_area_m2, "join_tolerance_mm": join_tolerance_mm,
+        "chain_lines": chain_lines, "inner_loops_as_holes": inner_loops_as_holes,
+        "bbox_mm": bbox_mm, "type_id": type_id, "type_name": type_name,
+        "dry_run": dry_run},
+        timeout=None if dry_run else BATCH_TIMEOUT)
+
+
+@mcp.tool()
 def create_stairs_from_cad(link_id: int, layers: list[str], level_id: int,
                            top_level_id: int | None = None,
                            height_mm: float | None = None,
@@ -622,9 +686,19 @@ def create_stairs_from_cad(link_id: int, layers: list[str], level_id: int,
                            width_min_mm: float = 600.0,
                            width_max_mm: float = 3500.0,
                            min_treads: int = 3,
-                           landing_max_mm: float = 3000.0,
+                           landing_max_mm: float = 2200.0,
                            skip_existing: bool = True,
-                           ai_tag: str = "_AI") -> dict:
+                           ai_tag: str = "_AI",
+                           from_below: bool = False,
+                           base_level_id: int | None = None,
+                           break_layers: list[str] | None = None,
+                           cut_mark_mm: float = 600.0,
+                           nosing_max_mm: float = 100.0,
+                           riser_min_mm: float = 130.0,
+                           riser_max_mm: float = 220.0,
+                           riser_target_mm: float = 170.0,
+                           min_risers: int = 5,
+                           width_add_mm: float = 0.0) -> dict:
     """Build stairs from the tread lines on CAD stair layer(s): a run is a comb
     of >= `min_treads` parallel, equal-length (= run width), equally spaced
     (= tread depth, within tread_min/max) lines; runs whose ends lie within
@@ -632,12 +706,24 @@ def create_stairs_from_cad(link_id: int, layers: list[str], level_id: int,
     an automatic landing). Base = `level_id`, top = `top_level_id` (default:
     the next level up) or `height_mm`; risers = tread lines counted, a stair
     type "<base type> T<tread> R<riser>_AI" is duplicated from `type_id` (or the
-    first stair type) with matching min tread / max riser. Direction (bottom ->
-    top): the run end nearest a path arrowhead (small closed triangle on
-    `arrow_layers` or the stair layers) is the top; without one the order is a
-    guess and reported. Spiral / winder stairs are not handled. Stairs whose
-    footprint overlaps an existing stair on the level are skipped. Needs its
-    own StairsEditScope, so it cannot run inside execute_code's transaction.
+    first stair type) with matching min tread / max riser.
+    A floor plan shows the stairs GOING UP cut at the view plane (break line)
+    and the stairs ARRIVING from the level below complete - so for a
+    level-by-level rebuild use `from_below=True` on the plan of the level
+    ABOVE: top = `level_id`, base = `base_level_id` or, if omitted, the level
+    below whose height gives the most plausible riser (closest to
+    `riser_target_mm` within riser_min/max). `width_add_mm` is added to the
+    tread-line length (Revit draws treads between the stringers). Nosing doubles (two lines < `nosing_max_mm` apart) and
+    superimposed lines are deduped; runs crossed by a break line (zigzag
+    polyline on `break_layers` / stair / arrow layers, e.g. A-242-MB_STAIR)
+    are dropped (they cannot be modelled from this plan); chains with fewer
+    than `min_risers` or an implausible riser height are skipped. Direction: path arrowheads (closed triangle or open
+    "V" on `arrow_layers` or the stair layers) - an UP arrow (apex within
+    `cut_mark_mm` of a break line) points to the top, a DN arrow (stair from
+    below) to the bottom; without one the order is a guess and reported.
+    Spiral / winder stairs are not handled. Stairs whose footprint overlaps an
+    existing stair on the base level are skipped. Needs its own
+    StairsEditScope, so it cannot run inside execute_code's transaction.
     dry_run=True first: lists planned stairs (runs, risers, riser height,
     direction source, bbox)."""
     return _call("create_stairs_from_cad", {
@@ -647,7 +733,12 @@ def create_stairs_from_cad(link_id: int, layers: list[str], level_id: int,
         "tread_min_mm": tread_min_mm, "tread_max_mm": tread_max_mm,
         "width_min_mm": width_min_mm, "width_max_mm": width_max_mm,
         "min_treads": min_treads, "landing_max_mm": landing_max_mm,
-        "skip_existing": skip_existing, "ai_tag": ai_tag},
+        "skip_existing": skip_existing, "ai_tag": ai_tag,
+        "from_below": from_below, "base_level_id": base_level_id,
+        "break_layers": break_layers, "cut_mark_mm": cut_mark_mm,
+        "nosing_max_mm": nosing_max_mm, "riser_min_mm": riser_min_mm,
+        "riser_max_mm": riser_max_mm, "riser_target_mm": riser_target_mm,
+        "min_risers": min_risers, "width_add_mm": width_add_mm},
         timeout=None if dry_run else BATCH_TIMEOUT)
 
 
