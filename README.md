@@ -81,6 +81,16 @@ folder's files into the Addins path by hand. If `pip` can't reach GitHub, use
 `pip install mcp<2 httpx` from your internal mirror plus a source checkout
 (`python <repo>\mcp_server\server.py`).
 
+**"Revit cannot run the external application RevitMCP"** at start-up: the files
+came from a downloaded zip and Windows marked them as from the internet, so .NET
+refuses to load them. `install.ps1` (v0.2.1+) unblocks them; with an older
+installer run once
+`Get-ChildItem "$env:APPDATA\Autodesk\Revit\Addins\<year>" | Unblock-File`
+and restart Revit. If it still fails, the exact exception is in Revit's journal
+(`%LOCALAPPDATA%\Autodesk\Revit\Autodesk Revit <year>\Journals\`, search for
+`RevitMCP`) - make sure the `<year>` folder holds the build for *that* Revit year
+(2024 = .NET Framework, 2025/2026 = .NET 8 builds are not interchangeable).
+
 **Upgrading:** download the new zip and rerun `install.ps1` (Revit may need a
 restart if it was open); the Python side updates on the next `uvx` run
 (`uvx --refresh …`) or `pipx upgrade revit-mcp-bridge`.

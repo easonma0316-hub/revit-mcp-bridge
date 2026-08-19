@@ -85,6 +85,10 @@ foreach ($year in ($RevitYears | Sort-Object -Unique)) {
     $dst = Join-Path $addinsRoot "$year"
     New-Item -ItemType Directory -Force -Path $dst | Out-Null
 
+    # Files extracted from a downloaded zip carry the "Mark of the Web"; .NET then refuses to
+    # load the DLL and Revit shows "Revit cannot run the external application RevitMCP".
+    Get-ChildItem $src -File | Unblock-File -ErrorAction SilentlyContinue
+
     # Everything the build produced for this year: the add-in DLL, its
     # dependencies (Roslyn on .NET 8) and the manifest.
     foreach ($file in (Get-ChildItem $src -File | Where-Object { $_.Extension -in '.dll', '.addin' })) {
@@ -106,6 +110,7 @@ foreach ($year in ($RevitYears | Sort-Object -Unique)) {
             Write-Host "  $($file.Name) was locked (Revit running?) - replaced; restart Revit $year to load it." -ForegroundColor Yellow
         }
     }
+    Get-ChildItem $dst -File | Unblock-File -ErrorAction SilentlyContinue
     # Clean up parked copies from earlier installs when nothing holds them any more.
     Get-ChildItem $dst -Filter "*.old*" -File -ErrorAction SilentlyContinue |
         ForEach-Object { Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue }
