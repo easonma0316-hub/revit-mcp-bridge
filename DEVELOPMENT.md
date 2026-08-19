@@ -151,3 +151,39 @@ git push origin v0.1.0
 ```
 
 Bump `version` in `pyproject.toml` to match the tag first.
+
+## Benchmark: rebuilding the Snowdon sample from its own DWG exports
+
+A reproducible accuracy check for the CAD-driven tools: take Revit's shipped
+`Snowdon Towers Sample Architectural.rvt`, export the floor plans to DWG
+(`export_dwg`), link them into an empty metric project (`create_level`,
+`create_floor_plan_view`, `link_cad` origin-to-origin), rebuild level by level
+(walls → doors → windows → columns → stairs `from_below` → floor), then
+`dump_model` both and score with `dev/compare_models.py truth.json test.json
+--level L3 --truth-cut` (a plan shows every wall cut at level + 1200, not only
+walls based on that level).
+
+Layers in Revit's export standard: walls `A-200-M_WALL*`, doors `A-325-M_DOOR`
+(swing arcs; `A-325-A_DOOR` = tags), windows `A-314-M_WINDOW`, columns
+`S-280-M_COLUMN` + `A-280-M_COLUMN`, stairs `A-242-M_STAIR` (treads, two lines
+per nosing), `A-242-A_STAIR` (UP/DN paths), `A-242-MB_STAIR` (above-cut
+outlines + break line), curtain walls `A-214-M_CURT_WALL` (floor closure).
+
+State 2026-08-19 (7 plans; L2–L5 with the `--truth-cut` metric):
+
+| category | metric | L2 | L3 | L4 | L5 |
+|---|---|---|---|---|---|
+| walls | length-coverage recall (≥80 % covered) | 64 % | 66 % | 67 % | 63 % |
+| walls | thickness agreement (matched) | 97 % | 91 % | – | 90 % |
+| doors | F1 / width agreement | 84 % / 100 % | 91 % / 100 % | 91 % / 100 % | 80 % / 100 % |
+| windows | F1 | 58 % | 57 % | 64 % | 68 % |
+| columns | precision / recall | 100 / 48 % | 100 / 53 % | 100 / 54 % | 100 / 60 % |
+| stairs (based on level) | matched / truth | 3 / 5 | 2 / 3 | 1 / 2 | 3 / 3 |
+
+Whole building: 17 stairs built, 15 match one of the 26 truth stairs (run
+count right in 11; riser count exact in 4); 14 slabs cover 95 % of the 228
+truth floor bboxes. Known limits: columns drawn as W-shapes inside wall-layer
+outlines are not recoverable; the split L1 levels (Block 35/37/43, M1) make the
+L1 plan ambiguous; the Snowdon lobby is a plan region with a higher cut plane
+(stairs there stay ambiguous); walls behind fixtures / curtain walls are not on
+the wall layers.
