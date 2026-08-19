@@ -169,6 +169,7 @@ namespace RevitMCP.Addin
                 return null;
             }
             var floorsPlanned = new List<(CurveLoop outer, List<CurveLoop> holes, double areaM2)>();
+            var rawOuter = new List<CurveLoop>(); // un-deflated outlines (fallback when the deflated loop is invalid)
             foreach (Face f in acc.Faces)
             {
                 var pf = f as PlanarFace;
@@ -198,6 +199,7 @@ namespace RevitMCP.Addin
                     }
                 if (deflated == outer && gap > 0) warnings.Add($"footprint part ({Math.Round(areaM2)} m2): could not deflate the outline by gap_mm - it is {gap} mm too big all round.");
                 floorsPlanned.Add((deflated, holes, LoopArea(deflated) * 0.09290304));
+                rawOuter.Add(SimplifyLoop(outer, MmToFt(20), z0));
             }
             if (floorsPlanned.Count == 0) throw new McpException(McpException.NotFound, $"No footprint part >= min_area_m2 ({minArea}).");
 
@@ -246,8 +248,9 @@ namespace RevitMCP.Addin
                         }
                     }
                 }
-                foreach (var fp in floorsPlanned)
+                for (int fi = 0; fi < floorsPlanned.Count; fi++)
                 {
+                    var fp = floorsPlanned[fi];
                     var desc = new Dictionary<string, object>
                     {
                         ["area_m2"] = Math.Round(fp.areaM2, 1),
@@ -265,17 +268,19 @@ namespace RevitMCP.Addin
                     }
                     catch (Exception ex)
                     {
-                        // holes may self-intersect with the outer loop: retry without them
-                        try
+                        // holes may self-intersect with the outer loop: retry without them; a deflated
+                        // outline can self-intersect too: retry with the raw (gap_mm too big) outline
+                        Floor fl = null; string note = null;
+                        try { fl = Floor.Create(doc, new List<CurveLoop> { fp.outer }, ft.Id, level.Id); note = "holes dropped: " + ex.Message; }
+                        catch
                         {
-                            var fl = Floor.Create(doc, new List<CurveLoop> { fp.outer }, ft.Id, level.Id);
-                            desc["id"] = fl.Id.Value; desc["type"] = ft.Name; desc["holes"] = 0; desc["note"] = "holes dropped: " + ex.Message;
-                            created.Add(desc);
+                            try { fl = Floor.Create(doc, new List<CurveLoop> { rawOuter[fi] }, ft.Id, level.Id); note = $"deflated outline invalid - used the raw outline ({gap} mm too big all round): " + ex.Message; }
+                            catch (Exception ex3) { failures.Add($"floor ({Math.Round(fp.areaM2)} m2): {ex3.Message}"); }
                         }
-                        catch (Exception ex2) { failures.Add($"floor ({Math.Round(fp.areaM2)} m2): {ex2.Message}"); }
+                        if (fl != null) { desc["id"] = fl.Id.Value; desc["type"] = ft.Name; desc["holes"] = 0; desc["note"] = note; created.Add(desc); }
                     }
                 }
-                if (ownTx) t.Commit();
+                if (ownTx) CommitOrThrow(t, "floors");
             }
             finally { if (ownTx && t.HasStarted() && !t.HasEnded()) t.RollBack(); t?.Dispose(); }
 
@@ -553,7 +558,7 @@ namespace RevitMCP.Addin
                     }
                     catch (Exception ex) { failures.Add($"floor ({Math.Round(plans[i].areaM2)} m2 at {plans[i].bb[0]},{plans[i].bb[1]}): {ex.Message}"); }
                 }
-                if (ownTx) t.Commit();
+                if (ownTx) CommitOrThrow(t, "floors");
             }
             finally { if (ownTx && t.HasStarted() && !t.HasEnded()) t.RollBack(); t?.Dispose(); }
 

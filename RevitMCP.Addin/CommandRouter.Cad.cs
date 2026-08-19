@@ -1148,8 +1148,19 @@ namespace RevitMCP.Addin
                     $"{merged.Count + curved.Count} walls would be created (max_walls={maxWalls}). Narrow bbox_mm or raise max_walls.");
 
             // ---- 4. resolve wall types by thickness --------------------------
+            string aiTag0 = p.ContainsKey("ai_tag") && p["ai_tag"] != null ? Convert.ToString(p["ai_tag"]) : "_AI";
+            bool HasSweeps(WallType wt)
+            {
+                try { var c0 = wt.GetCompoundStructure(); return c0 != null && c0.GetWallSweepsInfo(WallSweepType.Sweep).Count + c0.GetWallSweepsInfo(WallSweepType.Reveal).Count > 0; }
+                catch { return false; }
+            }
+            // Types with integral sweeps / reveals (plinths, banding, footings) are decorative
+            // variants; Revit refuses some walls of such types at commit time ("Could not create
+            // integral wall sweep ... Failed to cut wall" rolls the whole transaction back), so they
+            // are not candidates unless forced via type_map. AI-made types keep their place (their
+            // sweeps are stripped before walls are created).
             var basicTypes = new FilteredElementCollector(doc).OfClass(typeof(WallType)).Cast<WallType>()
-                .Where(t => t.Kind == WallKind.Basic).ToList();
+                .Where(t => t.Kind == WallKind.Basic && (!HasSweeps(t) || (aiTag0 != "" && t.Name.EndsWith(aiTag0, StringComparison.Ordinal)))).ToList();
             var explicitMap = new Dictionary<double, ElementId>();
             if (p.ContainsKey("type_map") && p["type_map"] is IEnumerable tm && !(p["type_map"] is string))
                 foreach (var item in tm)
@@ -1200,6 +1211,7 @@ namespace RevitMCP.Addin
                 }
                 var dup = src.Duplicate(name) as WallType;
                 var cs = dup.GetCompoundStructure();
+                StripSweeps(cs);
                 int idx = cs.LayerCount == 1 ? 0 : Math.Max(0, cs.GetFirstCoreLayerIndex());
                 var newLayer = FtToMm(cs.GetLayerWidth(idx)) + (centerThick - FtToMm(cs.GetWidth()));
                 if (newLayer > 0) cs.SetLayerWidth(idx, MmToFt(newLayer));
@@ -1261,6 +1273,7 @@ namespace RevitMCP.Addin
                             {
                                 var dup = src.Duplicate(name) as WallType;
                                 var cs = dup.GetCompoundStructure();
+                                StripSweeps(cs);
                                 int idx = cs.LayerCount == 1 ? 0 : cs.GetFirstCoreLayerIndex();
                                 if (idx < 0)
                                 {
@@ -1359,6 +1372,20 @@ namespace RevitMCP.Addin
                         fh.SetFailuresPreprocessor(new SilentFailures());
                         t.SetFailureHandlingOptions(fh);
                     }
+                    // AI-made wall types inherited integral sweeps from their base type in earlier
+                    // versions; those break the commit for some walls ("Could not create integral wall
+                    // sweep ... Failed to cut wall" = DocumentCorruption -> whole transaction rolled back)
+                    foreach (var wt in basicTypes.Where(x => x.Name.EndsWith(aiTag, StringComparison.Ordinal)).ToList())
+                    {
+                        try
+                        {
+                            var cs0 = wt.GetCompoundStructure(); if (cs0 == null) continue;
+                            if (cs0.GetWallSweepsInfo(WallSweepType.Sweep).Count + cs0.GetWallSweepsInfo(WallSweepType.Reveal).Count == 0) continue;
+                            StripSweeps(cs0); wt.SetCompoundStructure(cs0);
+                            warnings.Add($"Removed integral sweeps/reveals from '{wt.Name}' (they break wall creation).");
+                        }
+                        catch { }
+                    }
                     foreach (var w in merged)
                     {
                         var wt = w.Centerline ? ResolveCenterType() : ResolveType(w.Thickness);
@@ -1389,7 +1416,7 @@ namespace RevitMCP.Addin
                             failures.Add($"curved wall r={Math.Round(c.R)} @ ({Math.Round(c.Cx)}, {Math.Round(c.Cy)}): {ex.Message}");
                         }
                     }
-                    if (ownTx) t.Commit();
+                    if (ownTx) CommitOrThrow(t, "walls from CAD");
                 }
                 finally
                 {
@@ -1521,15 +1548,47 @@ namespace RevitMCP.Addin
             segs.Add(seg);
         }
 
-        /// <summary>Swallow warnings (e.g. "walls overlap") so batch creation doesn't pop dialogs.</summary>
+        /// <summary>
+        /// Integral wall sweeps / reveals of a duplicated type are decoration the AI thickness
+        /// variants do not need - and they make Revit reject short / odd walls at commit time
+        /// ("Could not create integral wall sweep ... Failed to cut wall" rolls the WHOLE
+        /// transaction back). Strip them.
+        /// </summary>
+        private static void StripSweeps(CompoundStructure cs)
+        {
+            try
+            {
+                bool any = cs.GetWallSweepsInfo(WallSweepType.Sweep).Count > 0 || cs.GetWallSweepsInfo(WallSweepType.Reveal).Count > 0;
+                if (any) { cs.ClearWallSweeps(WallSweepType.Sweep); cs.ClearWallSweeps(WallSweepType.Reveal); }
+            }
+            catch { }
+        }
+
+        /// <summary>Swallow warnings (e.g. "walls overlap") so batch creation doesn't pop dialogs; remember errors.</summary>
         private sealed class SilentFailures : IFailuresPreprocessor
         {
+            public static readonly List<string> LastErrors = new List<string>();
             public FailureProcessingResult PreprocessFailures(FailuresAccessor a)
             {
                 foreach (var f in a.GetFailureMessages())
+                {
                     if (f.GetSeverity() == FailureSeverity.Warning) a.DeleteWarning(f);
+                    else lock (LastErrors) LastErrors.Add($"[{f.GetSeverity()}] {f.GetDescriptionText()} ({f.GetFailingElementIds().Count} element(s))");
+                }
                 return FailureProcessingResult.Continue;
             }
+        }
+
+        /// <summary>Commit and fail loudly if Revit rolled the transaction back (errors are not dialogs in batch mode).</summary>
+        private static void CommitOrThrow(Transaction t, string what)
+        {
+            lock (SilentFailures.LastErrors) SilentFailures.LastErrors.Clear();
+            var st = t.Commit();
+            if (st == TransactionStatus.Committed) return;
+            string errs;
+            lock (SilentFailures.LastErrors) errs = string.Join("; ", SilentFailures.LastErrors.Distinct().Take(5));
+            throw new McpException(McpException.Internal,
+                $"{what}: Revit rolled the transaction back ({st}) - nothing was kept. {errs}");
         }
     }
 }

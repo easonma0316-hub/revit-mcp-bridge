@@ -487,7 +487,7 @@ namespace RevitMCP.Addin
                         failures.Add($"{d.Kind} {Math.Round(d.Width)} mm at ({Math.Round(d.Cx)}, {Math.Round(d.Cy)}): {ex.Message}");
                     }
                 }
-                if (ownTx) t.Commit();
+                if (ownTx) CommitOrThrow(t, "doors from CAD");
             }
             finally
             {

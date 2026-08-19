@@ -242,12 +242,49 @@ def report_columns(truth, test, tol_pos, tol_width, ignore_level, cap):
 
 
 def report_floors(truth, test, tol_pos, ignore_level, cap):
-    field = LEVEL_FIELD["floors"]
-    matches, misses, extras = match_points(truth, test, tol_pos, field, ignore_level, bbox_center)
-    p, r, f1 = prf(len(truth), len(test), len(matches))
+    """Floors are compared by footprint, not one-to-one: a rebuild typically has one slab per
+    level where the truth has many finish floors / landings. A truth floor counts as covered when
+    >= 70 % of its bbox lies inside the union of the test floors' bboxes (approximated by summing
+    pairwise bbox intersections, capped at the truth area); a test floor is 'supported' when
+    >= 50 % of its bbox is covered by truth floors. Also reports total area per side.
+    Note: bbox-based, so L-shaped slabs over-count."""
+    def area(b):
+        return max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
+
+    def inter(a, b):
+        ix0, iy0 = max(a[0], b[0]), max(a[1], b[1])
+        ix1, iy1 = min(a[2], b[2]), min(a[3], b[3])
+        return max(0.0, ix1 - ix0) * max(0.0, iy1 - iy0)
+
+    tb = [(t, bbox_xy(t)) for t in truth]
+    sb = [(s, bbox_xy(s)) for s in test]
+    covered, misses = [], []
+    cov_area_t = 0.0
+    for t, b in tb:
+        if b is None or area(b) <= 0:
+            continue
+        c = min(area(b), sum(inter(b, b2) for _, b2 in sb if b2 is not None))
+        cov_area_t += c
+        (covered if c / area(b) >= 0.7 else misses).append(t)
+    supported, extras = [], []
+    for s, b in sb:
+        if b is None or area(b) <= 0:
+            continue
+        c = min(area(b), sum(inter(b, b2) for _, b2 in tb if b2 is not None))
+        (supported if c / area(b) >= 0.5 else extras).append(s)
+    truth_area = sum(t.get("area_m2") or 0 for t in truth)
+    test_area = sum(s.get("area_m2") or 0 for s in test)
+    n_t = len([1 for _, b in tb if b is not None])
+    n_s = len([1 for _, b in sb if b is not None])
+    r = len(covered) / n_t if n_t else 1.0
+    p = len(supported) / n_s if n_s else 1.0
+    f1 = 2 * p * r / (p + r) if (p + r) else 0.0
     return {
-        "truth_n": len(truth), "test_n": len(test), "matched": len(matches),
+        "truth_n": len(truth), "test_n": len(test), "matched": len(covered),
         "precision": p, "recall": r, "f1": f1,
+        "supported": len(supported),
+        "truth_area_m2": truth_area, "test_area_m2": test_area,
+        "truth_bbox_area_covered": (cov_area_t / sum(area(b) for _, b in tb if b is not None)) if tb else 0.0,
         "misses": [fmt_floor(e) for e in misses[: None if cap else 40]],
         "extras": [fmt_floor(e) for e in extras[: None if cap else 40]],
         "misses_n": len(misses), "extras_n": len(extras),
@@ -590,6 +627,11 @@ def print_report(cat, rep, cap_all):
         if rep["matched"]:
             print(f"riser-count exact agreement (matched): {rep['riser_agree']}/{rep['matched']}")
             print(f"run-count exact agreement (matched): {rep['run_agree']}/{rep['matched']}")
+    elif cat == "floors":
+        print(f"footprint: truth floors >=70% covered by test slabs = {rep['matched']}/{rep['truth_n']} (recall above); "
+              f"test slabs >=50% over truth floors = {rep['supported']}/{rep['test_n']} (precision above); "
+              f"truth bbox area covered {rep['truth_bbox_area_covered'] * 100:.1f}%; "
+              f"area truth {rep['truth_area_m2']:.0f} m2 vs test {rep['test_area_m2']:.0f} m2")
     elif cat == "grids":
         if rep["endpoint_known"]:
             print(f"endpoint agreement (name-matched, known both sides): "

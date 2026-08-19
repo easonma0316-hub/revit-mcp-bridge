@@ -1250,7 +1250,7 @@ public static class McpDynamicCode
                     // Transaction is disposed without commit -> model changes roll back.
                     throw ex.InnerException ?? ex;
                 }
-                t.Commit();
+                CommitOrThrow(t, "execute_code");
             }
             return new Dictionary<string, object> { ["result"] = Jsonable(value, 0) };
         }

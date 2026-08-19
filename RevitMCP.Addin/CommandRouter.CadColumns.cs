@@ -499,7 +499,7 @@ namespace RevitMCP.Addin
                         failures.Add($"{c.Kind} at ({Math.Round(c.Cx)}, {Math.Round(c.Cy)}): {ex.Message}");
                     }
                 }
-                if (ownTx) t.Commit();
+                if (ownTx) CommitOrThrow(t, "columns from CAD");
             }
             finally { t?.Dispose(); }
 

@@ -143,7 +143,9 @@ Details, build instructions and how to add tools: see [DEVELOPMENT.md](DEVELOPME
 | `create_doors_from_cad` | write | Door swing arcs → hosted doors with correct hand/facing, types auto-created by width |
 | `create_columns_from_cad` | write | Column rectangles/circles → structural (or architectural) columns, types by size |
 | `create_windows_from_cad` | write | Window symbol lines along a wall → hosted windows, types by width (walls built with `window_layers`) |
-| `create_stairs_from_cad` | write | Tread-line combs → stairs (straight runs + automatic landings), riser count from the drawing |
+| `create_stairs_from_cad` | write | Tread-line combs → stairs (straight runs + automatic landings), riser count from the drawing; `from_below=True` reads the stairs arriving at a plan's level (Revit draws the stair going up cut, the one from below complete) |
+| `create_floor_from_walls` | write | Slab = footprint of the level's walls (inflated/unioned/deflated), optional CAD layers to close curtain-wall gaps |
+| `create_floors_from_cad` | write | Closed outlines (polylines / chained lines) on a layer → floors, nested loops = holes |
 | `snapshot_region` | read | PNG of a plan region (bbox in mm; highlight walls/doors, hide the DWG) — look at CAD vs. modelled result |
 | `open_document` | write | Open and activate a .rvt file |
 | `create_floor_plan_view` | write | New floor/ceiling plan view on a level |
@@ -191,6 +193,14 @@ Workflow, on a floor plan whose DWG has separate wall / door layers:
    `create_windows_from_cad(link_id, layers=["A-WINDOW"], level_id)` — the
    window lines drawn along the wall give width and centre; sill via
    `sill_height_mm`. Unknown/imperial wall thicknesses: `auto_thicknesses=True`.
+   Stairs: `create_stairs_from_cad(link_id, layers=["A-STAIR"], level_id,
+   from_below=True)` on the plan of the level the stairs ARRIVE at (a floor
+   plan shows the stair going up cut at the view plane, the one coming from
+   below complete), `arrow_layers` for UP/DN path arrows, `break_layers` for
+   the break-line symbol. Floors: once the walls stand,
+   `create_floor_from_walls(level_id, gap_mm=600, link_id, layers=[curtain /
+   storefront layers])` makes the slab from the wall footprint; slab outlines
+   drawn as closed polylines go through `create_floors_from_cad`.
 6. `snapshot_region(bbox_mm=..., highlight=True, hide_links=True)` → open the
    PNG and compare the modelled walls/doors/columns with the CAD; fix by hand
    or re-run with different layers / tolerances.
