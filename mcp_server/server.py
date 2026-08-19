@@ -615,6 +615,40 @@ def create_windows_from_cad(link_id: int, layers: list[str], level_id: int,
 
 
 @mcp.tool()
+def list_warnings(max_ids: int = 20, include_swallowed: bool = True) -> dict:
+    """List the document's warnings - what Revit's 'Review Warnings' dialog shows
+    (walls overlap, elements joined but not intersecting, duplicate Mark values,
+    slightly off axis, room not enclosed, ...), grouped by description with
+    counts, categories, involved element ids (up to `max_ids`) and whether
+    `fix_warnings` can fix the class automatically. `include_swallowed` adds the
+    transient warnings the add-in dismissed while running MCP commands (since
+    Revit started). Read-only."""
+    return _call("list_warnings", {"max_ids": max_ids, "include_swallowed": include_swallowed})
+
+
+@mcp.tool()
+def fix_warnings(dry_run: bool = True, kinds: list[str] | None = None,
+                 duplicate_tolerance_mm: float = 50.0, touch_tolerance_mm: float = 5.0,
+                 max_fixes: int = 500) -> dict:
+    """Fix the warning classes that are safe to automate: UnjoinDisjoint
+    ('joined but do not intersect' -> unjoin), DeleteDuplicateWall ('walls
+    overlap' between parallel straight walls: footprints merely touching / grazing
+    by <= `touch_tolerance_mm` -> nudge the thinner wall apart by that amount
+    (invisible, clears the warning); one wall's footprint entirely inside the
+    other's (within `duplicate_tolerance_mm` along, 20 mm across) and hosting no
+    doors/windows -> delete it; partial / crossing overlaps are only reported),
+    ClearDuplicateMark (duplicate 'Mark' -> clear all but the first). `kinds`
+    restricts to some of those names. dry_run=True returns the plan (actions
+    + skipped with reasons) without touching the model; dry_run=False applies
+    it and reports warnings before/after."""
+    return _call("fix_warnings", {"dry_run": dry_run, "kinds": kinds,
+                                  "duplicate_tolerance_mm": duplicate_tolerance_mm,
+                                  "touch_tolerance_mm": touch_tolerance_mm,
+                                  "max_fixes": max_fixes},
+                 timeout=None if dry_run else BATCH_TIMEOUT)
+
+
+@mcp.tool()
 def create_floor_from_walls(level_id: int, gap_mm: float = 150.0,
                             link_id: int | None = None,
                             layers: list[str] | None = None,

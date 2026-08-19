@@ -70,6 +70,16 @@ namespace RevitMCP.Addin
             finally { InRequest = false; }
         }
 
+        internal sealed class SwallowedWarning
+        {
+            public string Description;
+            public int Count;
+            public DateTime Last;
+            public HashSet<long> ElementIds = new HashSet<long>();
+        }
+        /// <summary>Warnings deleted by the hook during MCP requests, by description (since start-up).</summary>
+        internal static readonly Dictionary<string, SwallowedWarning> SwallowedWarnings = new Dictionary<string, SwallowedWarning>();
+
         private static bool _hooked;
         private static void EnsureFailureHook(UIApplication app)
         {
@@ -83,7 +93,23 @@ namespace RevitMCP.Addin
                     var fa = e.GetFailuresAccessor();
                     bool any = false;
                     foreach (var f in fa.GetFailureMessages())
-                        if (f.GetSeverity() == Autodesk.Revit.DB.FailureSeverity.Warning) { fa.DeleteWarning(f); any = true; }
+                    {
+                        if (f.GetSeverity() != Autodesk.Revit.DB.FailureSeverity.Warning) continue;
+                        // remember what was swallowed (list_warnings reports it)
+                        try
+                        {
+                            var desc = f.GetDescriptionText();
+                            lock (SwallowedWarnings)
+                            {
+                                if (!SwallowedWarnings.TryGetValue(desc, out var rec)) SwallowedWarnings[desc] = rec = new SwallowedWarning { Description = desc };
+                                rec.Count++;
+                                rec.Last = DateTime.Now;
+                                foreach (var id in f.GetFailingElementIds()) if (rec.ElementIds.Count < 200) rec.ElementIds.Add(id.Value);
+                            }
+                        }
+                        catch { }
+                        fa.DeleteWarning(f); any = true;
+                    }
                     if (any) e.SetProcessingResult(Autodesk.Revit.DB.FailureProcessingResult.Continue);
                 };
             }
