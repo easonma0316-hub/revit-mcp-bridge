@@ -615,6 +615,104 @@ def create_windows_from_cad(link_id: int, layers: list[str], level_id: int,
 
 
 @mcp.tool()
+def create_roofs_from_cad(link_id: int, layers: list[str], level_id: int,
+                          thickness_mm: float | None = None, offset_mm: float = 0.0,
+                          type_id: int | None = None, type_name: str | None = None,
+                          min_area_m2: float = 5.0, join_tolerance_mm: float = 25.0,
+                          inner_loops_as_openings: bool = True,
+                          bbox_mm: list[list[float]] | None = None,
+                          dry_run: bool = True) -> dict:
+    """Flat footprint roofs from roof outlines on CAD layer(s): closed polylines
+    or chains of lines/arcs whose ends meet within `join_tolerance_mm`; loops
+    under `min_area_m2` ignored; a loop inside another becomes an opening. Roof
+    type: `type_id` / `type_name` (substring) / the default roof type;
+    `thickness_mm` duplicates it with the core layer resized ("<type>
+    300mm_AI"); `offset_mm` = base offset from the level. If the drawing has no
+    usable outline (common in plan exports: only edges outside the parapets
+    are drawn), use create_floor_from_walls(kind="roof") instead. dry_run
+    lists the loops (area, vertices, bbox, outline points) and the available
+    roof types - confirm thickness / type with the user before building."""
+    return _call("create_roofs_from_cad", {
+        "link_id": link_id, "layers": layers, "level_id": level_id, "thickness_mm": thickness_mm,
+        "offset_mm": offset_mm, "type_id": type_id, "type_name": type_name, "min_area_m2": min_area_m2,
+        "join_tolerance_mm": join_tolerance_mm, "inner_loops_as_openings": inner_loops_as_openings,
+        "bbox_mm": bbox_mm, "dry_run": dry_run},
+        timeout=None if dry_run else BATCH_TIMEOUT)
+
+
+@mcp.tool()
+def create_railings_from_cad(link_id: int, layers: list[str], level_id: int,
+                             type_id: int | None = None, type_name: str | None = None,
+                             height_mm: float | None = None,
+                             min_segment_mm: float = 150.0, min_path_mm: float = 600.0,
+                             join_tolerance_mm: float = 30.0, double_line_mm: float = 120.0,
+                             path_duplicate_mm: float = 150.0,
+                             exclude_on_stairs: bool = True,
+                             exclude_bboxes_mm: list[list[list[float]]] | None = None,
+                             base_offset_mm: float = 0.0, skip_existing: bool = True,
+                             bbox_mm: list[list[float]] | None = None,
+                             dry_run: bool = True) -> dict:
+    """Railings from the railing layer(s) of a plan: railings are drawn as thin
+    outlines / parallel lines (`double_line_mm` apart) - they are collapsed to
+    a midline, chained into paths (ends within `join_tolerance_mm`), short
+    symbols (< `min_segment_mm`: balusters, posts) and leftovers (paths <
+    `min_path_mm`) dropped, parallel duplicates within `path_duplicate_mm`
+    removed. Paths on stair footprints (`exclude_on_stairs`, uses the stairs
+    in the model whose base or top is this level) and inside
+    `exclude_bboxes_mm` ([[[x0,y0],[x1,y1]], ...]) are skipped - stair
+    railings belong to the stairs. Type: `type_id` / `type_name` / nearest
+    `height_mm` (railing types and their heights are listed in the result) -
+    confirm height/type with the user first. dry_run lists the paths."""
+    return _call("create_railings_from_cad", {
+        "link_id": link_id, "layers": layers, "level_id": level_id, "type_id": type_id, "type_name": type_name,
+        "height_mm": height_mm, "min_segment_mm": min_segment_mm, "min_path_mm": min_path_mm,
+        "join_tolerance_mm": join_tolerance_mm, "double_line_mm": double_line_mm, "path_duplicate_mm": path_duplicate_mm,
+        "exclude_on_stairs": exclude_on_stairs, "exclude_bboxes_mm": exclude_bboxes_mm,
+        "base_offset_mm": base_offset_mm, "skip_existing": skip_existing, "bbox_mm": bbox_mm, "dry_run": dry_run},
+        timeout=None if dry_run else BATCH_TIMEOUT)
+
+
+@mcp.tool()
+def create_curtain_walls_from_cad(link_id: int, layers: list[str], level_id: int,
+                                  height_mm: float | None = None, top_level_id: int | None = None,
+                                  top_offset_mm: float = 0.0, base_offset_mm: float = 0.0,
+                                  mullion_layers: list[str] | None = None,
+                                  type_id: int | None = None, type_name: str | None = None,
+                                  mullion_type_id: int | None = None, mullion_type_name: str | None = None,
+                                  mullions: bool = True, grid_from_mullions: bool = True,
+                                  default_grid_mm: float = 0.0,
+                                  min_segment_mm: float = 100.0, join_gap_mm: float = 250.0,
+                                  collinear_tolerance_mm: float = 25.0, min_run_mm: float = 600.0,
+                                  double_line_mm: float = 200.0, mullion_max_area_m2: float = 0.05,
+                                  skip_existing: bool = True,
+                                  bbox_mm: list[list[float]] | None = None,
+                                  dry_run: bool = True, ai_tag: str = "_AI") -> dict:
+    """Curtain walls from glazing lines: collinear segments on `layers` with gaps
+    <= `join_gap_mm` (a mullion sits in the gap) form one run (>= `min_run_mm`);
+    the two faces of a glazing line (`double_line_mm` apart) collapse into one.
+    Small closed polylines (< `mullion_max_area_m2`, on `mullion_layers` or the
+    glazing layers) are mullion sections: their positions become the vertical
+    grid of the wall (else `default_grid_mm`, 0 = none). Built as Revit curtain
+    walls of a type derived from `type_id`/`type_name` (substring; default the
+    first 'Curtain Wall' type) named "<type> CAD grid_AI" with manual vertical
+    grid and mullions (`mullion_type_name`, default a rectangular one) on grid
+    lines and borders. Height: `top_level_id` (+`top_offset_mm`) or
+    `height_mm` - the height is NOT in the plan: dry_run first, confirm with
+    the user, then build. Existing curtain walls passing through the level
+    (multi-storey glazing built once) are not rebuilt."""
+    return _call("create_curtain_walls_from_cad", {
+        "link_id": link_id, "layers": layers, "level_id": level_id, "height_mm": height_mm,
+        "top_level_id": top_level_id, "top_offset_mm": top_offset_mm, "base_offset_mm": base_offset_mm,
+        "mullion_layers": mullion_layers, "type_id": type_id, "type_name": type_name,
+        "mullion_type_id": mullion_type_id, "mullion_type_name": mullion_type_name, "mullions": mullions,
+        "grid_from_mullions": grid_from_mullions, "default_grid_mm": default_grid_mm,
+        "min_segment_mm": min_segment_mm, "join_gap_mm": join_gap_mm, "collinear_tolerance_mm": collinear_tolerance_mm,
+        "min_run_mm": min_run_mm, "double_line_mm": double_line_mm, "mullion_max_area_m2": mullion_max_area_m2,
+        "skip_existing": skip_existing, "bbox_mm": bbox_mm, "dry_run": dry_run, "ai_tag": ai_tag},
+        timeout=None if dry_run else BATCH_TIMEOUT)
+
+
+@mcp.tool()
 def list_warnings(max_ids: int = 20, include_swallowed: bool = True) -> dict:
     """List the document's warnings - what Revit's 'Review Warnings' dialog shows
     (walls overlap, elements joined but not intersecting, duplicate Mark values,
@@ -650,6 +748,7 @@ def fix_warnings(dry_run: bool = True, kinds: list[str] | None = None,
 
 @mcp.tool()
 def create_floor_from_walls(level_id: int, gap_mm: float = 150.0,
+                            kind: str = "floor", offset_mm: float = 0.0,
                             link_id: int | None = None,
                             layers: list[str] | None = None,
                             cad_thickness_mm: float = 100.0,
@@ -664,7 +763,9 @@ def create_floor_from_walls(level_id: int, gap_mm: float = 150.0,
                             thickness_mm: float | None = None,
                             dry_run: bool = True,
                             ai_tag: str = "_AI") -> dict:
-    """Create the floor slab(s) of a level from the walls already modelled on it
+    """Create the floor slab(s) (kind="floor") or a flat footprint roof
+    (kind="roof", type from the roof types, `offset_mm` = base offset) of a
+    level from the walls already modelled on it
     (architectural plans rarely draw slab outlines - the outer wall faces are the
     slab edge). Every wall footprint on `level_id` (optionally only `wall_ids`,
     `exterior_only` = Function: Exterior, or inside `bbox_mm`) is inflated by
@@ -678,7 +779,8 @@ def create_floor_from_walls(level_id: int, gap_mm: float = 150.0,
     `thickness_mm` duplicates it as "<type> <mm>mm_AI" with the core layer
     resized. dry_run=True first (area, vertex count, bbox per planned floor)."""
     return _call("create_floor_from_walls", {
-        "level_id": level_id, "gap_mm": gap_mm, "link_id": link_id, "layers": layers,
+        "level_id": level_id, "gap_mm": gap_mm, "kind": kind, "offset_mm": offset_mm,
+        "link_id": link_id, "layers": layers,
         "cad_thickness_mm": cad_thickness_mm, "min_area_m2": min_area_m2,
         "min_hole_area_m2": min_hole_area_m2, "max_hole_area_m2": max_hole_area_m2,
         "exterior_only": exterior_only, "wall_ids": wall_ids, "bbox_mm": bbox_mm,

@@ -103,6 +103,9 @@ namespace RevitMCP.Addin
                 case "create_windows_from_cad": return CreateWindowsFromCad(uidoc, p);
                 case "create_stairs_from_cad":  return CreateStairsFromCad(uidoc, p);
                 case "create_floor_from_walls": return CreateFloorFromWalls(uidoc, p);
+                case "create_roofs_from_cad":   return CreateRoofsFromCad(uidoc, p);
+                case "create_railings_from_cad": return CreateRailingsFromCad(uidoc, p);
+                case "create_curtain_walls_from_cad": return CreateCurtainWallsFromCad(uidoc, p);
                 case "list_warnings":           return ListWarnings(uidoc, p);
                 case "fix_warnings":            return FixWarnings(uidoc, p);
                 case "create_floors_from_cad":  return CreateFloorsFromCad(uidoc, p);

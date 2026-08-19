@@ -31,6 +31,8 @@ namespace RevitMCP.Addin
             double maxHole = GetDoubleOr(p, "max_hole_area_m2", 40);
             bool exteriorOnly = GetBoolOr(p, "exterior_only", false);
             string aiTag = GetOptString(p, "ai_tag") ?? "_AI";
+            string kind = (GetOptString(p, "kind") ?? "floor").ToLowerInvariant();   // "floor" | "roof" (flat footprint roof)
+            bool asRoof = kind == "roof";
             var bbox = GetOptBboxMm(p);
             var warnings = new List<string>();
 
@@ -207,12 +209,24 @@ namespace RevitMCP.Addin
             var optType = GetOptLong(p, "type_id");
             string typeName = GetOptString(p, "type_name");
             var floorTypes = new FilteredElementCollector(doc).OfClass(typeof(FloorType)).Cast<FloorType>().Where(t => !t.IsFoundationSlab).ToList();
-            FloorType ft = null;
-            if (optType.HasValue) ft = doc.GetElement(new ElementId(optType.Value)) as FloorType;
-            else if (!string.IsNullOrEmpty(typeName)) ft = floorTypes.FirstOrDefault(t => t.Name == typeName) ?? floorTypes.FirstOrDefault(t => t.Name.IndexOf(typeName, StringComparison.OrdinalIgnoreCase) >= 0);
-            if (ft == null) { var def = doc.GetElement(doc.GetDefaultElementTypeId(ElementTypeGroup.FloorType)) as FloorType; ft = def ?? floorTypes.FirstOrDefault(); }
-            if (ft == null) throw new McpException(McpException.NotFound, "No floor type in the document.");
+            var roofTypes = new FilteredElementCollector(doc).OfClass(typeof(RoofType)).Cast<RoofType>().ToList();
+            FloorType ft = null; RoofType rt = null;
+            if (asRoof)
+            {
+                if (optType.HasValue) rt = doc.GetElement(new ElementId(optType.Value)) as RoofType;
+                else if (!string.IsNullOrEmpty(typeName)) rt = roofTypes.FirstOrDefault(t => t.Name == typeName) ?? roofTypes.FirstOrDefault(t => t.Name.IndexOf(typeName, StringComparison.OrdinalIgnoreCase) >= 0);
+                if (rt == null) rt = doc.GetElement(doc.GetDefaultElementTypeId(ElementTypeGroup.RoofType)) as RoofType ?? roofTypes.FirstOrDefault();
+                if (rt == null) throw new McpException(McpException.NotFound, "No roof type in the document.");
+            }
+            else
+            {
+                if (optType.HasValue) ft = doc.GetElement(new ElementId(optType.Value)) as FloorType;
+                else if (!string.IsNullOrEmpty(typeName)) ft = floorTypes.FirstOrDefault(t => t.Name == typeName) ?? floorTypes.FirstOrDefault(t => t.Name.IndexOf(typeName, StringComparison.OrdinalIgnoreCase) >= 0);
+                if (ft == null) { var def = doc.GetElement(doc.GetDefaultElementTypeId(ElementTypeGroup.FloorType)) as FloorType; ft = def ?? floorTypes.FirstOrDefault(); }
+                if (ft == null) throw new McpException(McpException.NotFound, "No floor type in the document.");
+            }
             double? thick = p.ContainsKey("thickness_mm") ? GetDoubleOr(p, "thickness_mm", 0) : (double?)null;
+            double offsetMm = GetDoubleOr(p, "offset_mm", 0);
 
             // ---- 5. create --------------------------------------------------------------------
             var created = new List<Dictionary<string, object>>();
@@ -223,7 +237,32 @@ namespace RevitMCP.Addin
             try
             {
                 if (ownTx) { t.Start(); var fh = t.GetFailureHandlingOptions(); fh.SetFailuresPreprocessor(new SilentFailures()); t.SetFailureHandlingOptions(fh); }
-                if (!dryRun && thick.HasValue && thick.Value > 0)
+                if (!dryRun && asRoof && thick.HasValue && thick.Value > 0)
+                {
+                    var cs = rt.GetCompoundStructure();
+                    double cur = cs != null ? FtToMm(cs.GetWidth()) : 0;
+                    if (Math.Abs(cur - thick.Value) > 0.5)
+                    {
+                        var name = $"{rt.Name} {Math.Round(thick.Value)}mm{aiTag}";
+                        var existing = roofTypes.FirstOrDefault(x => x.Name == name);
+                        if (existing != null) rt = existing;
+                        else
+                        {
+                            var nt = rt.Duplicate(name) as RoofType;
+                            var ncs = nt.GetCompoundStructure();
+                            if (ncs != null)
+                            {
+                                int core = ncs.GetFirstCoreLayerIndex(); if (core < 0) core = 0;
+                                double others = 0; for (int i = 0; i < ncs.LayerCount; i++) if (i != core) others += ncs.GetLayerWidth(i);
+                                ncs.SetLayerWidth(core, Math.Max(MmToFt(1), MmToFt(thick.Value) - others));
+                                nt.SetCompoundStructure(ncs);
+                            }
+                            MarkAiType(nt, "create_floor_from_walls (roof)", rt.Name);
+                            rt = nt; typeCreated = name;
+                        }
+                    }
+                }
+                if (!dryRun && !asRoof && thick.HasValue && thick.Value > 0)
                 {
                     var cs = ft.GetCompoundStructure();
                     double cur = cs != null ? FtToMm(cs.GetWidth()) : 0;
@@ -259,10 +298,38 @@ namespace RevitMCP.Addin
                         ["bbox_mm"] = LoopBboxMm(fp.outer),
                     };
                     if (dryRun) { desc["outline_mm"] = LoopPointsMm(fp.outer); created.Add(desc); continue; }
+                    if (asRoof)
+                    {
+                        try
+                        {
+                            var ca = new CurveArray();
+                            foreach (var c in fp.outer) ca.Append(c);
+                            foreach (var hole in fp.holes) foreach (var c in hole) ca.Append(c);
+                            var mca = new ModelCurveArray();
+                            var roof = doc.Create.NewFootPrintRoof(ca, level, rt, out mca);
+                            foreach (ModelCurve mc in mca) { try { roof.set_DefinesSlope(mc, false); } catch { } }
+                            if (Math.Abs(offsetMm) > 1e-6) roof.get_Parameter(BuiltInParameter.ROOF_LEVEL_OFFSET_PARAM)?.Set(MmToFt(offsetMm));
+                            desc["id"] = roof.Id.Value; desc["type"] = rt.Name; created.Add(desc);
+                        }
+                        catch (Exception ex)
+                        {
+                            try
+                            {
+                                var ca = new CurveArray(); foreach (var c in rawOuter[fi]) ca.Append(c);
+                                var mca = new ModelCurveArray();
+                                var roof = doc.Create.NewFootPrintRoof(ca, level, rt, out mca);
+                                foreach (ModelCurve mc in mca) { try { roof.set_DefinesSlope(mc, false); } catch { } }
+                                desc["id"] = roof.Id.Value; desc["type"] = rt.Name; desc["holes"] = 0; desc["note"] = $"deflated outline invalid - used the raw outline ({gap} mm too big all round): " + ex.Message; created.Add(desc);
+                            }
+                            catch (Exception ex2) { failures.Add($"roof ({Math.Round(fp.areaM2)} m2): {ex2.Message}"); }
+                        }
+                        continue;
+                    }
                     try
                     {
                         var loops = new List<CurveLoop> { fp.outer }; loops.AddRange(fp.holes);
                         var fl = Floor.Create(doc, loops, ft.Id, level.Id);
+                        if (Math.Abs(offsetMm) > 1e-6) fl.get_Parameter(BuiltInParameter.FLOOR_HEIGHTABOVELEVEL_PARAM)?.Set(MmToFt(offsetMm));
                         desc["id"] = fl.Id.Value; desc["type"] = ft.Name;
                         created.Add(desc);
                     }
@@ -295,7 +362,8 @@ namespace RevitMCP.Addin
                 ["gap_mm"] = gap,
                 ["floors_planned"] = floorsPlanned.Count,
                 ["floors_created"] = dryRun ? 0 : created.Count(d => d.ContainsKey("id")),
-                ["floor_type"] = ft.Name,
+                ["kind"] = kind,
+                ["floor_type"] = asRoof ? rt.Name : ft.Name,
                 ["type_created"] = typeCreated,
                 ["floors"] = created,
                 ["failures"] = failures,
